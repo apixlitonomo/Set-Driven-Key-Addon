@@ -1,6 +1,6 @@
 bl_info = {
     "name": "Set Driven Key",
-    "author": "CloudKing",
+    "author": "OceanMan, CloudKing",
     "version": (1, 1, 0),
     "blender": (3, 0, 0),
     "location": "3D Viewport > Sidebar (N) > Driven Key",
@@ -17,6 +17,7 @@ from bpy.props import (
     BoolVectorProperty,
     CollectionProperty,
     EnumProperty,
+    FloatProperty,
     FloatVectorProperty,
     IntProperty,
     PointerProperty,
@@ -171,6 +172,17 @@ def custom_specs(s):
     return [parse_custom(t) for t in s.ch_custom.split(";") if t.strip()]
 
 
+def capture_driver_rest(s):
+    """Remember the driver's current value as its rest value."""
+    if s.driver_obj is None:
+        return
+    try:
+        rel, idx = driver_spec(s)
+        s.driver_rest = get_value(s.driver_obj, full_path(s.driver_bone, rel), idx)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # --------------------------------------------------------------------------
 # Driver / curve helpers
 # --------------------------------------------------------------------------
@@ -260,6 +272,18 @@ def key_curve(fc, x, y, interpolation, extrapolation):
     fc.update()
 
 
+def add_rest_key(s, fc, x, rest_y):
+    """On a brand-new curve, also key the rest state (driver at its rest value).
+
+    Without it a curve with one key is constant, so the driven channel would stay in
+    the keyed pose even when the driver goes back to rest.
+    """
+    if rest_y is None or not s.auto_rest_key:
+        return
+    if len(fc.keyframe_points) == 0 and abs(x - s.driver_rest) >= KEY_EPS:
+        key_curve(fc, s.driver_rest, rest_y, s.interpolation, s.extrapolation)
+
+
 def safe_call(fn, label, *args):
     """Run one key operation. A failure becomes a message instead of aborting everything."""
     try:
@@ -290,7 +314,7 @@ def additive_targets(item, kind, axis):
     ]
 
 
-def ensure_constraint(item, kind, drv_obj, drv_bone, mute):
+def ensure_constraint(item, kind, mute):
     pb = owner_of(item)
     name = SDK_CON[kind]
     con = pb.constraints.get(name)
@@ -322,8 +346,10 @@ def ensure_constraint(item, kind, drv_obj, drv_bone, mute):
             con.mix_mode_scale = "MULTIPLY"
         con.mute = mute
     # The target only exists to keep the constraint valid; the output doesn't use it.
-    con.target = drv_obj
-    con.subtarget = drv_bone or ""
+    # The bone's own armature object can never form a dependency cycle (a driver bone
+    # that is a child of the driven bone would), and it doesn't depend on the driver.
+    con.target = item.obj
+    con.subtarget = ""
     return con
 
 
@@ -410,7 +436,7 @@ def key_additive(s, item, kind, axis, drv_obj, d_path, d_idx, d_var_path, x):
 
     if item.bone:
         try:
-            ensure_constraint(item, kind, drv_obj, s.driver_bone, not s.live_preview)
+            ensure_constraint(item, kind, not s.live_preview)
         except Exception as e:  # noqa: BLE001
             return "Can't set up constraint on '%s': %s" % (item.bone, e)
 
@@ -419,6 +445,7 @@ def key_additive(s, item, kind, axis, drv_obj, d_path, d_idx, d_var_path, x):
         fc, msg = ensure_driver(obj, path, idx, drv_obj, d_var_path, mute)
         if fc is None:
             return msg
+        add_rest_key(s, fc, x, ident)  # additive rest = "no offset"
         key_curve(fc, x, value, s.interpolation, s.extrapolation)
     return ""
 
@@ -436,6 +463,19 @@ def key_direct(s, item, attr, idx, drv_obj, d_path, d_idx, d_var_path, x):
     fc, msg = ensure_driver(obj, path, idx, drv_obj, d_var_path, not s.live_preview)
     if fc is None:
         return msg
+
+    # Direct rest = the base value captured when the driven item was loaded.
+    rest_y = None
+    if idx >= 0:
+        if attr == "location":
+            rest_y = item.rest_loc[idx]
+        elif attr == "rotation_euler":
+            rest_y = item.rest_euler[idx]
+        elif attr == "rotation_quaternion":
+            rest_y = item.rest_quat[idx]
+        elif attr == "scale":
+            rest_y = item.rest_scale[idx]
+    add_rest_key(s, fc, x, rest_y)
     key_curve(fc, x, y, s.interpolation, s.extrapolation)
     return ""
 
@@ -484,6 +524,10 @@ def _preview_update(self, context):
                         con.mute = not on
 
 
+def _driver_changed(self, context):
+    capture_driver_rest(self)
+
+
 class SDK_DrivenItem(PropertyGroup):
     obj: PointerProperty(type=bpy.types.Object)
     bone: StringProperty()
@@ -500,10 +544,23 @@ class SDK_Settings(PropertyGroup):
     driver_bone: StringProperty()
     driver_channel: EnumProperty(
         name="Channel", items=DRIVER_ITEMS, default="location:0",
-        description="Driver channel",
+        description="Driver channel", update=_driver_changed,
     )
     driver_custom: StringProperty(
         name="Path", description='Data path, e.g. ["myprop"] or location[2]',
+        update=_driver_changed,
+    )
+    driver_rest: FloatProperty(
+        name="Rest",
+        description="Driver value at which the driven channels are in their original state. "
+                    "Captured when you load the driver or change its channel; edit it if needed",
+    )
+    auto_rest_key: BoolProperty(
+        name="Auto Rest Key",
+        description="When a driven curve gets its first key, also key the rest state at the "
+                    "driver's rest value, so the driven channels return to their original "
+                    "state when the driver does",
+        default=True,
     )
 
     # Driven
@@ -584,6 +641,38 @@ class SDK_OT_load_driver(Operator):
             bone = context.active_pose_bone.name
         s.driver_obj = obj
         s.driver_bone = bone
+        capture_driver_rest(s)
+        return {"FINISHED"}
+
+
+class SDK_OT_capture_driver_rest(Operator):
+    bl_idname = "sdk.capture_driver_rest"
+    bl_label = "Capture Driver Rest"
+    bl_description = "Use the driver's current value as its rest value"
+
+    def execute(self, context):
+        capture_driver_rest(context.scene.sdk_settings)
+        return {"FINISHED"}
+
+
+class SDK_OT_driver_to_rest(Operator):
+    bl_idname = "sdk.driver_to_rest"
+    bl_label = "Driver to Rest"
+    bl_description = "Set the driver channel back to its rest value"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        s = context.scene.sdk_settings
+        if s.driver_obj is None:
+            self.report({"ERROR"}, "Load a driver first")
+            return {"CANCELLED"}
+        rel, idx = driver_spec(s)
+        try:
+            set_by_path(s.driver_obj, full_path(s.driver_bone, rel), idx, s.driver_rest)
+        except Exception as e:  # noqa: BLE001
+            self.report({"ERROR"}, "Can't set driver value: %s" % e)
+            return {"CANCELLED"}
+        context.view_layer.update()
         return {"FINISHED"}
 
 
@@ -880,6 +969,12 @@ class SDK_PT_main(Panel):
         else:
             box.label(text="No driver loaded", icon="INFO")
 
+        if s.driver_obj:
+            row = box.row(align=True)
+            row.prop(s, "driver_rest", text="Rest")
+            row.operator("sdk.capture_driver_rest", text="", icon="PINNED")
+            row.operator("sdk.driver_to_rest", text="", icon="LOOP_BACK")
+
         # ---- Driven -------------------------------------------------------
         box = layout.box()
         box.label(text="Driven", icon="LINKED")
@@ -907,6 +1002,7 @@ class SDK_PT_main(Panel):
 
         # ---- Mode ---------------------------------------------------------
         layout.prop(s, "mode", expand=True)
+        layout.prop(s, "auto_rest_key")
         if s.mode == "ADDITIVE":
             row = layout.row(align=True)
             row.operator("sdk.capture_base", icon="PINNED")
@@ -950,6 +1046,8 @@ classes = (
     SDK_DrivenItem,
     SDK_Settings,
     SDK_OT_load_driver,
+    SDK_OT_capture_driver_rest,
+    SDK_OT_driver_to_rest,
     SDK_OT_load_driven,
     SDK_OT_remove_driven,
     SDK_OT_capture_base,
