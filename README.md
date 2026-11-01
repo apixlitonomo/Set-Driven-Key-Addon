@@ -5,7 +5,7 @@
 **Addon name (in Blender):** Set Driven Key  
 **Version:** 1.1.0  
 **Minimum Blender:** 3.0.0  
-**Authors:** Apixelitonomo, Oceanman, CloudKing  
+**Authors:** Oceanman, CloudKing  
 **Location:** 3D Viewport → Sidebar (**N**) → **Driven Key**  
 **Category:** Animation
 
