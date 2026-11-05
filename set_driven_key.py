@@ -1,34 +1,3 @@
-# ==========================================================================
-# Set Driven Key 1.5.0 - change notes (vs 1.4.0)
-#
-#  * set_by_path(): token-based resolver; array elements (location[0]),
-#    ID props (["p"], pose.bones["B"]["p"]) and shape-key paths all work.
-#    Scrub / Prev-Next Key / Driver to Rest use the same read/write helpers.
-#  * find_driver_fcurve(): scalar drivers live at array_index 0 in Blender
-#    (drivers.find(path, index=-1) never matches), so -1 is translated to 0
-#    but an *array* property without index no longer matches element 0.
-#  * Mirror: Direct, Additive (scoped Transformation constraints) and Action
-#    Constraint modes; signs come from the bones' rest matrices (falls back
-#    to Blender's X-mirror convention); .L/.R, _L/_R, .left/.right, prefixes.
-#  * Load Mesh Shape Keys also adds the mesh to the driven list.
-#  * Action mode with non-transform drivers (custom props, quaternion, other
-#    IDs) uses the constraint's Evaluation Time, driven by an SDK f-curve.
-#    Mapping (all Action modes): driver value v -> action frame v * 100.
-#  * add_rest_key() never skipped on empty / single-pending-key curves;
-#    custom channels remember their rest value (SDK_DrivenItem.rest_custom).
-#  * SDK_Constraint_Target is parked in a hidden collection and removed when
-#    unused (Delete Curves, unregister).
-#  * Live Preview mutes/unmutes drivers (incl. shape-key IDs) and SDK
-#    constraints (Additive + Action) through one shared function.
-#  * Configurations store pointers + name/data/library fallbacks; JSON
-#    Export / Import; clear warnings for missing items.
-#  * Mode-conflict detection when keying (Direct vs Additive vs Action,
-#    foreign drivers, driver re-binding).
-#  * Keyed-value list in the panel is cached (invalidated by operators,
-#    undo/redo, file load); narrower exception handling; UNDO on all
-#    data-changing operators.
-# ==========================================================================
-
 bl_info = {
     "name": "Set Driven Key",
     "author": "OceanMan, CloudKing, Apixelitonomo, U.F.Olive",
