@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Set Driven Key",
     "author": "OceanMan, CloudKing, Apixelitonomo, U.F.Olive",
-    "version": (1, 5, 0),
+    "version": (3, 5, 0),
     "blender": (3, 0, 0),
     "location": "3D Viewport > Sidebar (N) > Driven Key",
     "description": "Professional Set Driven Key for Blender with Configuration Manager, Multi-Axis Stacking, Additive, Direct, and Action Constraint modes",
