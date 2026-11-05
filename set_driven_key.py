@@ -1,12 +1,23 @@
 bl_info = {
     "name": "Set Driven Key",
     "author": "OceanMan, CloudKing",
-    "version": (1, 4, 0),
+    "version": (1, 5, 0),
     "blender": (3, 0, 0),
     "location": "3D Viewport > Sidebar (N) > Driven Key",
     "description": "Professional Set Driven Key for Blender with Configuration Manager, Multi-Axis Stacking, Additive, Direct, and Action Constraint modes",
     "category": "Animation",
 }
+
+# Version 1.5.0 improvements:
+# - Robust path resolution (set_by_path) supporting array elements, ID properties, and Shape Keys.
+# - Full support for arbitrary data paths (e.g. bpy.data.objects["..."]... or custom properties).
+# - Action Constraint mode with support for custom driver properties via evaluation proxy.
+# - Full symmetry pose mirroring across all modes (Direct, Additive, and Action Constraint).
+# - Automatic active mesh registration on shape key loading.
+# - Rest-key ordering robustness ensuring initial keys are never skipped.
+# - UI caching of keyed values for performance.
+# - JSON configuration import/export and robust fallback handling.
+# - Dummy target garbage collection on curve deletion and addon unregistration.
 
 import json
 import math
@@ -51,6 +62,10 @@ DUMMY_TARGET_NAME = "SDK_Constraint_Target"
 _CUSTOM_RE = re.compile(r"^(.+)\[(\d+)\]$")
 _BPY_DATA_RE = re.compile(r"^bpy\.data\.([a-zA-Z0-9_]+)\[[\"\']([^\"\']+)[\"\']\]\.(.+)$")
 _BONE_SUBPATH_RE = re.compile(r"^pose\.bones\[[\"\']([^\"\']+)[\"\']\]\.(.+)$")
+_IDPROP_RE = re.compile(
+    r'^(?P<parent>.*?)\[(?P<q>["\'])(?P<name>(?:\\.|(?!(?P=q)).)*)(?P=q)\]'
+    r'(?:\[(?P<idx>\d+)\])?$'
+)
 
 
 def parse_custom(text):
@@ -64,7 +79,7 @@ def parse_custom(text):
 
 def full_path(bone, rel):
     """Data path relative to the Object, optionally going through a pose bone."""
-    if not bone:
+    if not bone or rel.startswith("data.") or rel.startswith("bpy.data."):
         return rel
     base = 'pose.bones["%s"]' % bpy.utils.escape_identifier(bone)
     return base + (rel if rel.startswith("[") else "." + rel)
@@ -75,11 +90,9 @@ def var_path(path, index):
 
 
 def resolve_driver_target(s):
-    """Resolve the effective ID block, bone name, relative attribute path, array index,
+    """Resolve effective ID block, bone name, relative attribute path, array index,
 
-    and driver variable data path for the current driver setting.
-    Handles standard channels, relative custom paths, and full 'bpy.data...' paths.
-    Returns (drv_id, drv_bone, rel_attr, idx, d_var_path, scope_key).
+    driver variable data path, and scope key for the driver setting.
     """
     layer = getattr(s, "config_layer_tag", "").strip()
     layer_tag = ("_" + re.sub(r"[^a-zA-Z0-9_]", "_", layer)) if layer else ""
@@ -135,37 +148,48 @@ def get_value(obj, path, index):
     return float(value)
 
 
-# Matches a data path that ends in a custom (ID) property: <parent>["name"] or <parent>["name"][2]
-_IDPROP_RE = re.compile(
-    r'^(?P<parent>.*?)\[(?P<q>["\'])(?P<name>(?:\\.|(?!(?P=q)).)*)(?P=q)\]'
-    r'(?:\[(?P<idx>\d+)\])?$'
-)
-
-
 def set_by_path(obj, path, index, value):
-    """Assign `value` to the property at `path` (optionally an array element)."""
-    id_block, rel_path = resolve_id_and_path(obj, path)
-    m = _IDPROP_RE.match(rel_path)
-    if m:
-        parent = m.group("parent")
+    """Robust assignment handling RNA attributes, array elements, ID properties, and Shape Keys."""
+    if path.startswith("data.shape_keys."):
+        id_block = obj.data.shape_keys if (obj and hasattr(obj, "data") and hasattr(obj.data, "shape_keys")) else obj
+        rel = path[len("data.shape_keys."):]
+    else:
+        id_block = obj
+        rel = path
+
+    # Check ID properties: <parent>["name"] or ["name"] with optional [idx]
+    m_id = _IDPROP_RE.match(rel)
+    if m_id:
+        parent = m_id.group("parent")
         owner = id_block.path_resolve(parent) if parent else id_block
-        name = bpy.utils.unescape_identifier(m.group("name"))
-        idx = int(m.group("idx")) if m.group("idx") is not None else index
+        name = bpy.utils.unescape_identifier(m_id.group("name"))
+        idx = int(m_id.group("idx")) if m_id.group("idx") is not None else index
         if idx >= 0:
             owner[name][idx] = value
         else:
             owner[name] = value
         return
 
-    if "." in rel_path:
-        parent, prop = rel_path.rsplit(".", 1)
+    # Check RNA array subscript: <base>[<idx>]
+    m_idx = re.match(r"^(.+)\[(\d+)\]$", rel)
+    if m_idx:
+        base_path = m_idx.group(1)
+        idx = int(m_idx.group(2))
+        target = id_block.path_resolve(base_path)
+        target[idx] = value
+        return
+
+    if index >= 0:
+        target = id_block.path_resolve(rel)
+        target[index] = value
+        return
+
+    if "." in rel:
+        parent, prop = rel.rsplit(".", 1)
         owner = id_block.path_resolve(parent)
     else:
-        owner, prop = id_block, rel_path
-    if index >= 0:
-        getattr(owner, prop)[index] = value
-    else:
-        setattr(owner, prop, value)
+        owner, prop = id_block, rel
+    setattr(owner, prop, value)
 
 
 def identity_for(path):
@@ -237,7 +261,8 @@ def capture_driver_rest(s):
             return
         val = drv_id.path_resolve(d_var_path)
         s.driver_rest = float(val)
-    except Exception:  # noqa: BLE001
+        invalidate_keys_cache()
+    except (AttributeError, KeyError, TypeError, ValueError):
         pass
 
 
@@ -255,21 +280,39 @@ def get_or_create_dummy_target():
     return empty
 
 
+def cleanup_dummy_target_if_unused():
+    """Remove the dummy Empty if no remaining constraints reference it."""
+    empty = bpy.data.objects.get(DUMMY_TARGET_NAME)
+    if empty is None:
+        return
+    for obj in bpy.data.objects:
+        for c in obj.constraints:
+            if getattr(c, "target", None) == empty:
+                return
+        if obj.pose:
+            for pb in obj.pose.bones:
+                for c in pb.constraints:
+                    if getattr(c, "target", None) == empty:
+                        return
+    bpy.data.objects.remove(empty)
+
+
 # --------------------------------------------------------------------------
 # Driver / curve helpers (High performance O(1) lookups)
 # --------------------------------------------------------------------------
 
 def find_driver_fcurve(target_id, path, index):
-    """Fast driver lookup using drivers.find(path, index)."""
+    """Fast driver lookup honoring array and non-array properties."""
     ad = target_id.animation_data
     if ad is None:
         return None
-    idx = max(index, 0)
     try:
-        return ad.drivers.find(path, index=idx)
+        if index >= 0:
+            return ad.drivers.find(path, index=index)
+        return ad.drivers.find(path)
     except Exception:
         for fc in ad.drivers:
-            if fc.data_path == path and (index < 0 or fc.array_index == idx):
+            if fc.data_path == path and (index < 0 or fc.array_index == index):
                 return fc
     return None
 
@@ -285,7 +328,7 @@ def ensure_driver(obj, path, index, drv_obj, drv_data_path, mute):
     if fc is None:
         try:
             fc = target_id.driver_add(rel_path, index) if index >= 0 else target_id.driver_add(rel_path)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             return None, "Cannot drive '%s': %s" % (rel_path, e)
         if isinstance(fc, (list, tuple)):
             target_id.driver_remove(rel_path)
@@ -350,18 +393,20 @@ def key_curve(fc, x, y, interpolation, extrapolation):
 
 
 def add_rest_key(s, fc, x, rest_y):
-    """On a brand-new curve, also key the rest state (driver at its rest value)."""
+    """Ensure the rest state key is created so channels return to base when driver does."""
     if rest_y is None or not s.auto_rest_key:
         return
-    if len(fc.keyframe_points) == 0 and abs(x - s.driver_rest) >= KEY_EPS:
+    kps = fc.keyframe_points
+    has_rest_key = any(abs(k.co.x - s.driver_rest) < KEY_EPS for k in kps)
+    if not has_rest_key and abs(x - s.driver_rest) >= KEY_EPS:
         key_curve(fc, s.driver_rest, rest_y, s.interpolation, s.extrapolation)
 
 
 def safe_call(fn, label, *args):
-    """Run one key operation. A failure becomes a message instead of aborting everything."""
+    """Run one key operation safely and return error message string if failed."""
     try:
         return fn(*args)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         traceback.print_exc()
         return "%s failed: %s" % (label, e)
 
@@ -496,13 +541,13 @@ def key_additive(s, item, kind, axis, drv_obj, d_path, d_idx, d_var_path, scope_
         if find_driver_fcurve(obj, p0, i0) is not None:
             try:
                 existing = get_value(obj, p0, i0)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 existing = ident
     value = existing * base_off if kind == "scale" else existing + base_off
 
     try:
         ensure_constraint(item, kind, scope_key, not s.live_preview)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return "Can't set up constraint on '%s': %s" % (item.bone or obj.name, e)
 
     for path, p_idx in targets:
@@ -520,9 +565,16 @@ def key_direct(s, item, attr, idx, drv_obj, d_path, d_idx, d_var_path, x):
     path = full_path(item.bone, attr)
     if obj == drv_obj and path == d_path and max(idx, 0) == max(d_idx, 0):
         return "'%s' can't drive itself" % path
+
+    # Check mode conflict safety: ensure property isn't controlled by an external driver
+    target_id, rel_path = resolve_id_and_path(obj, path)
+    existing_fc = find_driver_fcurve(target_id, rel_path, idx)
+    if existing_fc and not is_sdk_fcurve(existing_fc):
+        return "Channel '%s' is driven by an external non-SDK driver" % rel_path
+
     try:
         y = get_value(obj, path, idx)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return "Can't read '%s'" % var_path(path, idx)
     fc, msg = ensure_driver(obj, path, idx, drv_obj, d_var_path, not s.live_preview)
     if fc is None:
@@ -582,13 +634,33 @@ def get_action_for_driver(s, scope_key):
         if hasattr(act, "id_root"):
             try:
                 act.id_root = "OBJECT"
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         act.use_fake_user = True
     return act
 
 
-def ensure_action_constraint(s, item, action, scope_key, drv_obj, drv_bone):
+def ensure_action_driver_proxy(drv_obj, d_var_path):
+    """When driving from a custom non-transform path, drive the dummy target's Location X as a proxy."""
+    dummy = get_or_create_dummy_target()
+    fc = find_driver_fcurve(dummy, "location", 0)
+    if fc is None:
+        fc = dummy.driver_add("location", 0)
+    fc.driver.type = "SUM"
+    for m in list(fc.modifiers):
+        fc.modifiers.remove(m)
+    var = next((v for v in fc.driver.variables if v.name == SDK_VAR), None)
+    if var is None:
+        var = fc.driver.variables.new()
+        var.name = SDK_VAR
+        var.type = "SINGLE_PROP"
+    t = var.targets[0]
+    t.id = drv_obj
+    t.data_path = d_var_path
+    return dummy
+
+
+def ensure_action_constraint(s, item, action, scope_key, drv_obj, drv_bone, d_var_path):
     """Ensure an Action constraint exists on the target bone or object for this driver axis."""
     owner = owner_of(item)
     if owner is None:
@@ -602,14 +674,23 @@ def ensure_action_constraint(s, item, action, scope_key, drv_obj, drv_bone):
         if hasattr(con, "mix_mode"):
             try:
                 con.mix_mode = "BEFORE_SPLIT"
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         if hasattr(con, "show_expanded"):
             con.show_expanded = False
-    con.target = drv_obj
-    con.subtarget = drv_bone or ""
+
+    is_custom_non_tr = (s.driver_channel == "CUSTOM" and not re.match(r"^(?:.*?\.)?(location|rotation_euler|scale)\[[0-2]\]$", s.driver_custom.strip()))
+    if is_custom_non_tr:
+        proxy_target = ensure_action_driver_proxy(drv_obj, d_var_path)
+        con.target = proxy_target
+        con.subtarget = ""
+        con.transform_channel = "LOCATION_X"
+    else:
+        con.target = drv_obj
+        con.subtarget = drv_bone or ""
+        con.transform_channel = action_transform_channel(s)
+
     con.action = action
-    con.transform_channel = action_transform_channel(s)
     con.mute = not s.live_preview
     return con, ""
 
@@ -645,7 +726,7 @@ def update_action_constraint_ranges(action, s, scope_key):
             con.max = val_max
 
 
-def key_action_mode(s, item, attr, idx, action, scope_key, drv_obj, drv_bone, x):
+def key_action_mode(s, item, attr, idx, action, scope_key, drv_obj, drv_bone, d_var_path, x):
     """Key one channel into the Action for Action Constraint mode."""
     obj = item.obj
     if item.bone and obj == drv_obj and item.bone == drv_bone:
@@ -653,10 +734,10 @@ def key_action_mode(s, item, attr, idx, action, scope_key, drv_obj, drv_bone, x)
     path = full_path(item.bone, attr)
     try:
         y = get_value(obj, path, idx)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return "Can't read '%s'" % var_path(path, idx)
 
-    con, msg = ensure_action_constraint(s, item, action, scope_key, drv_obj, drv_bone)
+    con, msg = ensure_action_constraint(s, item, action, scope_key, drv_obj, drv_bone, d_var_path)
     if con is None:
         return msg
 
@@ -665,7 +746,7 @@ def key_action_mode(s, item, attr, idx, action, scope_key, drv_obj, drv_bone, x)
     if fc is None:
         fc = action.fcurves.new(path, index=max(idx, 0))
 
-    if s.auto_rest_key and len(fc.keyframe_points) == 0 and abs(x - s.driver_rest) >= KEY_EPS:
+    if s.auto_rest_key:
         rest_frame = s.driver_rest * 100.0
         rest_y = None
         if idx >= 0:
@@ -678,15 +759,25 @@ def key_action_mode(s, item, attr, idx, action, scope_key, drv_obj, drv_bone, x)
             elif attr == "scale":
                 rest_y = item.rest_scale[idx]
         if rest_y is not None:
-            key_curve(fc, rest_frame, rest_y, s.interpolation, s.extrapolation)
+            has_rest = any(abs(k.co.x - rest_frame) < KEY_EPS * 100.0 for k in fc.keyframe_points)
+            if not has_rest and abs(x - s.driver_rest) >= KEY_EPS:
+                key_curve(fc, rest_frame, rest_y, s.interpolation, s.extrapolation)
 
     key_curve(fc, frame, y, s.interpolation, s.extrapolation)
     return ""
 
 
 # --------------------------------------------------------------------------
-# Query helpers
+# Query helpers & Key Cache for Viewport Performance
 # --------------------------------------------------------------------------
+
+_KEYED_VALUES_CACHE = None
+
+
+def invalidate_keys_cache():
+    global _KEYED_VALUES_CACHE
+    _KEYED_VALUES_CACHE = None
+
 
 def all_targets(s, item, scope_key=""):
     """Every (path, index) the enabled channels could be driven through."""
@@ -702,8 +793,12 @@ def all_targets(s, item, scope_key=""):
     return out
 
 
-def get_all_keyed_values(s):
-    """Return sorted unique list of keyed driver values for currently enabled driven channels."""
+def get_all_keyed_values(s, use_cache=True):
+    """Return sorted unique list of keyed driver values, cached for UI redraw performance."""
+    global _KEYED_VALUES_CACHE
+    if use_cache and _KEYED_VALUES_CACHE is not None:
+        return _KEYED_VALUES_CACHE
+
     drv_id, drv_bone, rel_attr, idx, d_var_path, scope_key = resolve_driver_target(s)
     if drv_id is None:
         return []
@@ -714,7 +809,9 @@ def get_all_keyed_values(s):
             for fc in act.fcurves:
                 for kp in fc.keyframe_points:
                     values.add(round(kp.co.x / 100.0, 4))
-        return sorted(values)
+        res = sorted(values)
+        _KEYED_VALUES_CACHE = res
+        return res
 
     for item in s.driven_items:
         obj = item.obj
@@ -726,7 +823,9 @@ def get_all_keyed_values(s):
             if fc and is_sdk_fcurve(fc):
                 for kp in fc.keyframe_points:
                     values.add(round(kp.co.x, 4))
-    return sorted(values)
+    res = sorted(values)
+    _KEYED_VALUES_CACHE = res
+    return res
 
 
 # --------------------------------------------------------------------------
@@ -747,7 +846,7 @@ class SDK_ConfigItem(PropertyGroup):
     ch_quat: BoolVectorProperty(size=4, default=(False,) * 4)
     ch_scale: BoolVectorProperty(size=3, default=(False,) * 3)
     ch_custom: StringProperty(default="")
-    # Serialized driven targets: list of (obj_name, bone_name)
+    # Serialized driven targets list: [{'name': 'Arm', 'bone': 'B'}, ...]
     driven_data: StringProperty(default="[]")
 
 
@@ -784,6 +883,7 @@ def _preview_update(self, context):
 
 def _driver_changed(self, context):
     capture_driver_rest(self)
+    invalidate_keys_cache()
 
 
 def _driver_current_get(self):
@@ -793,7 +893,7 @@ def _driver_current_get(self):
             return 0.0
         val = drv_id.path_resolve(d_var_path)
         return float(val)
-    except Exception:  # noqa: BLE001
+    except (AttributeError, KeyError, TypeError, ValueError):
         return 0.0
 
 
@@ -805,7 +905,7 @@ def _driver_current_set(self, value):
         set_by_path(drv_id, d_var_path, -1, value)
         if bpy.context:
             bpy.context.view_layer.update()
-    except Exception:  # noqa: BLE001
+    except (AttributeError, KeyError, TypeError, ValueError):
         pass
 
 
@@ -827,6 +927,7 @@ class SDK_Settings(PropertyGroup):
         description="Unique tag for this configuration layer. When set, creates a new stacked "
                     "transform constraint / action layer instead of overwriting existing ones",
         default="",
+        update=lambda self, ctx: invalidate_keys_cache(),
     )
 
     # Driver
@@ -886,6 +987,7 @@ class SDK_Settings(PropertyGroup):
              "Great for complex multi-bone pose sets, facial shapes, and high viewport performance"),
         ],
         default="ADDITIVE",
+        update=lambda self, ctx: invalidate_keys_cache(),
     )
     auto_reset: BoolProperty(
         name="Reset to Base after Key",
@@ -945,7 +1047,7 @@ class SDK_OT_config_add(Operator):
         cfg.ch_quat = s.ch_quat
         cfg.ch_scale = s.ch_scale
         cfg.ch_custom = s.ch_custom
-        driven_list = [(it.obj.name if it.obj else "", it.bone) for it in s.driven_items]
+        driven_list = [{"obj": it.obj.name if it.obj else "", "bone": it.bone} for it in s.driven_items]
         cfg.driven_data = json.dumps(driven_list)
         s.config_index = len(s.configs) - 1
         self.report({"INFO"}, "Saved configuration '%s'" % cfg.name)
@@ -984,20 +1086,28 @@ class SDK_OT_config_load(Operator):
         s.ch_scale = cfg.ch_scale
         s.ch_custom = cfg.ch_custom
 
-        # Restore driven items
+        # Restore driven items with pointer and name fallback
+        missing = []
         try:
             driven_list = json.loads(cfg.driven_data)
             s.driven_items.clear()
-            for obj_name, bone_name in driven_list:
+            for entry in driven_list:
+                obj_name = entry.get("obj", "") if isinstance(entry, dict) else entry[0]
+                bone_name = entry.get("bone", "") if isinstance(entry, dict) else entry[1]
                 obj = bpy.data.objects.get(obj_name)
                 if obj:
                     item = s.driven_items.add()
                     item.obj = obj
                     item.bone = bone_name
                     capture(item)
-        except Exception as e:  # noqa: BLE001
+                else:
+                    missing.append(obj_name)
+        except Exception as e:
             self.report({"WARNING"}, "Could not fully restore driven targets: %s" % e)
 
+        if missing:
+            self.report({"WARNING"}, "Missing objects: %s" % ", ".join(missing))
+        invalidate_keys_cache()
         self.report({"INFO"}, "Loaded configuration '%s'" % cfg.name)
         return {"FINISHED"}
 
@@ -1051,6 +1161,7 @@ class SDK_OT_load_driver(Operator):
     bl_idname = "sdk.load_driver"
     bl_label = "Load Driver"
     bl_description = "Use the active object (or active bone in Pose Mode) as the driver"
+    bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
         s = context.scene.sdk_settings
@@ -1064,6 +1175,7 @@ class SDK_OT_load_driver(Operator):
         s.driver_obj = obj
         s.driver_bone = bone
         capture_driver_rest(s)
+        invalidate_keys_cache()
         return {"FINISHED"}
 
 
@@ -1071,9 +1183,11 @@ class SDK_OT_capture_driver_rest(Operator):
     bl_idname = "sdk.capture_driver_rest"
     bl_label = "Capture Driver Rest"
     bl_description = "Use the driver's current value as its rest value"
+    bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
         capture_driver_rest(context.scene.sdk_settings)
+        invalidate_keys_cache()
         return {"FINISHED"}
 
 
@@ -1091,7 +1205,7 @@ class SDK_OT_driver_to_rest(Operator):
             return {"CANCELLED"}
         try:
             set_by_path(drv_id, d_var_path, -1, s.driver_rest)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             self.report({"ERROR"}, "Can't set driver value: %s" % e)
             return {"CANCELLED"}
         context.view_layer.update()
@@ -1114,11 +1228,11 @@ class SDK_OT_jump_key(Operator):
             return {"CANCELLED"}
         try:
             cur = float(drv_id.path_resolve(d_var_path))
-        except Exception:  # noqa: BLE001
+        except Exception:
             self.report({"ERROR"}, "Can't read driver value")
             return {"CANCELLED"}
 
-        keys = get_all_keyed_values(s)
+        keys = get_all_keyed_values(s, use_cache=False)
         if not keys:
             self.report({"INFO"}, "No keys found on driven channels")
             return {"CANCELLED"}
@@ -1151,6 +1265,7 @@ class SDK_OT_channel_preset(Operator):
     bl_idname = "sdk.channel_preset"
     bl_label = "Channel Preset"
     bl_description = "Quick toggle channel selection presets"
+    bl_options = {"REGISTER", "UNDO"}
 
     action: EnumProperty(items=[
         ("ALL", "All", ""),
@@ -1189,6 +1304,7 @@ class SDK_OT_channel_preset(Operator):
             s.ch_rot = (False, False, False)
             s.ch_scale = (False, False, False)
             s.ch_quat = (False, False, False, False)
+        invalidate_keys_cache()
         return {"FINISHED"}
 
 
@@ -1196,6 +1312,7 @@ class SDK_OT_load_driven(Operator):
     bl_idname = "sdk.load_driven"
     bl_label = "Load Driven"
     bl_description = "Use selected objects (or selected bones in Pose Mode) as driven targets"
+    bl_options = {"REGISTER", "UNDO"}
 
     append: BoolProperty(default=False, options={"SKIP_SAVE"})
 
@@ -1220,13 +1337,15 @@ class SDK_OT_load_driven(Operator):
             item.obj = obj
             item.bone = bone
             capture(item)
+        invalidate_keys_cache()
         return {"FINISHED"}
 
 
 class SDK_OT_load_shape_keys(Operator):
     bl_idname = "sdk.load_shape_keys"
     bl_label = "Load Mesh Shape Keys"
-    bl_description = "Add all shape keys of the active mesh to custom driven channels"
+    bl_description = "Add all shape keys of active mesh to custom driven channels and add object to driven targets"
+    bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
         s = context.scene.sdk_settings
@@ -1234,17 +1353,27 @@ class SDK_OT_load_shape_keys(Operator):
         if not obj or not hasattr(obj, "data") or not hasattr(obj.data, "shape_keys") or not obj.data.shape_keys:
             self.report({"ERROR"}, "Active object has no shape keys")
             return {"CANCELLED"}
+
+        # Ensure active mesh object is in driven_items
+        existing = {(i.obj.as_pointer() if i.obj else 0, i.bone) for i in s.driven_items}
+        if (obj.as_pointer(), "") not in existing:
+            item = s.driven_items.add()
+            item.obj = obj
+            item.bone = ""
+            capture(item)
+
         basis = obj.data.shape_keys.reference_key
         keys = [k.name for k in obj.data.shape_keys.key_blocks if k != basis]
         if not keys:
             self.report({"INFO"}, "No non-basis shape keys found")
             return {"CANCELLED"}
         new_paths = ['data.shape_keys.key_blocks["%s"].value' % bpy.utils.escape_identifier(k) for k in keys]
-        existing = [p.strip() for p in s.ch_custom.split(";") if p.strip()]
+        existing_paths = [p.strip() for p in s.ch_custom.split(";") if p.strip()]
         for p in new_paths:
-            if p not in existing:
-                existing.append(p)
-        s.ch_custom = ";".join(existing)
+            if p not in existing_paths:
+                existing_paths.append(p)
+        s.ch_custom = ";".join(existing_paths)
+        invalidate_keys_cache()
         self.report({"INFO"}, "Added %d shape key(s) to Custom driven channels" % len(keys))
         return {"FINISHED"}
 
@@ -1253,12 +1382,14 @@ class SDK_OT_remove_driven(Operator):
     bl_idname = "sdk.remove_driven"
     bl_label = "Remove Driven"
     bl_description = "Remove the highlighted entry from the driven list"
+    bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
         s = context.scene.sdk_settings
         if 0 <= s.driven_index < len(s.driven_items):
             s.driven_items.remove(s.driven_index)
             s.driven_index = max(0, s.driven_index - 1)
+        invalidate_keys_cache()
         return {"FINISHED"}
 
 
@@ -1292,7 +1423,7 @@ class SDK_OT_reset_base(Operator):
 class SDK_OT_mirror_keys(Operator):
     bl_idname = "sdk.mirror_keys"
     bl_label = "Mirror / Flip to Symmetrical Bones"
-    bl_description = "Copy and mirror SDK drivers and curves to counterpart bones (e.g. .L <-> .R)"
+    bl_description = "Copy and mirror SDK drivers, constraints and curves to counterpart bones (.L <-> .R)"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -1316,6 +1447,8 @@ class SDK_OT_mirror_keys(Operator):
             return ""
 
         mirrored = 0
+        mode = s.mode
+
         for item in s.driven_items:
             if not item.bone or not item.obj:
                 continue
@@ -1323,23 +1456,75 @@ class SDK_OT_mirror_keys(Operator):
             if not opp_bone or opp_bone not in item.obj.pose.bones:
                 continue
 
-            for kind, axis in transform_specs(s):
-                src_path = full_path(item.bone, DIRECT_ATTR[kind])
-                dst_path = full_path(opp_bone, DIRECT_ATTR[kind])
-                src_fc = find_driver_fcurve(item.obj, src_path, axis)
-                if src_fc is None or not is_sdk_fcurve(src_fc):
-                    continue
+            # Ensure opposite bone is in driven_items
+            existing = {(it.obj.as_pointer() if it.obj else 0, it.bone) for it in s.driven_items}
+            if (item.obj.as_pointer(), opp_bone) not in existing:
+                opp_item = s.driven_items.add()
+                opp_item.obj = item.obj
+                opp_item.bone = opp_bone
+                capture(opp_item)
+            else:
+                opp_item = next(it for it in s.driven_items if it.obj == item.obj and it.bone == opp_bone)
 
-                flip_sign = -1.0 if (axis == 0 and kind in ("loc", "rot")) else 1.0
-                dst_fc, msg = ensure_driver(item.obj, dst_path, axis, drv_id, d_var_path, not s.live_preview)
-                if dst_fc:
+            if mode == "DIRECT":
+                for kind, axis in transform_specs(s):
+                    src_path = full_path(item.bone, DIRECT_ATTR[kind])
+                    dst_path = full_path(opp_bone, DIRECT_ATTR[kind])
+                    src_fc = find_driver_fcurve(item.obj, src_path, axis)
+                    if src_fc is None or not is_sdk_fcurve(src_fc):
+                        continue
+
+                    flip_sign = -1.0 if (axis == 0 and kind in ("loc", "rot")) else 1.0
+                    dst_fc, msg = ensure_driver(item.obj, dst_path, axis, drv_id, d_var_path, not s.live_preview)
+                    if dst_fc:
+                        while len(dst_fc.keyframe_points):
+                            dst_fc.keyframe_points.remove(dst_fc.keyframe_points[0], fast=True)
+                        for kp in src_fc.keyframe_points:
+                            key_curve(dst_fc, kp.co.x, kp.co.y * flip_sign, kp.interpolation, src_fc.extrapolation)
+                        mirrored += 1
+
+            elif mode == "ADDITIVE":
+                for kind, axis in transform_specs(s):
+                    con_name = constraint_name_for(kind, scope_key)
+                    ensure_constraint(opp_item, kind, scope_key, not s.live_preview)
+                    src_targets = additive_targets(item, kind, axis, scope_key)
+                    dst_targets = additive_targets(opp_item, kind, axis, scope_key)
+                    flip_sign = -1.0 if (axis == 0 and kind in ("loc", "rot")) else 1.0
+
+                    for (src_p, _), (dst_p, _) in zip(src_targets, dst_targets):
+                        src_fc = find_driver_fcurve(item.obj, src_p, -1)
+                        if src_fc is None or not is_sdk_fcurve(src_fc):
+                            continue
+                        dst_fc, msg = ensure_driver(item.obj, dst_p, -1, drv_id, d_var_path, not s.live_preview)
+                        if dst_fc:
+                            while len(dst_fc.keyframe_points):
+                                dst_fc.keyframe_points.remove(dst_fc.keyframe_points[0], fast=True)
+                            for kp in src_fc.keyframe_points:
+                                key_curve(dst_fc, kp.co.x, kp.co.y * flip_sign, kp.interpolation, src_fc.extrapolation)
+                            mirrored += 1
+
+            elif mode == "ACTION":
+                action = get_action_for_driver(s, scope_key)
+                ensure_action_constraint(s, opp_item, action, scope_key, drv_id, drv_bone, d_var_path)
+                for kind, axis in transform_specs(s):
+                    src_path = full_path(item.bone, DIRECT_ATTR[kind])
+                    dst_path = full_path(opp_bone, DIRECT_ATTR[kind])
+                    src_fc = action.fcurves.find(src_path, index=axis)
+                    if src_fc is None:
+                        continue
+                    dst_fc = action.fcurves.find(dst_path, index=axis)
+                    if dst_fc is None:
+                        dst_fc = action.fcurves.new(dst_path, index=axis)
+                    flip_sign = -1.0 if (axis == 0 and kind in ("loc", "rot")) else 1.0
                     while len(dst_fc.keyframe_points):
                         dst_fc.keyframe_points.remove(dst_fc.keyframe_points[0], fast=True)
                     for kp in src_fc.keyframe_points:
                         key_curve(dst_fc, kp.co.x, kp.co.y * flip_sign, kp.interpolation, src_fc.extrapolation)
                     mirrored += 1
+                update_action_constraint_ranges(action, s, scope_key)
 
         context.view_layer.update()
+        invalidate_keys_cache()
         self.report({"INFO"}, "Mirrored %d channel curve(s) across symmetry" % mirrored)
         return {"FINISHED"}
 
@@ -1360,7 +1545,7 @@ class SDK_OT_key(Operator):
         try:
             val = drv_id.path_resolve(d_var_path)
             x = float(val)
-        except Exception:  # noqa: BLE001
+        except Exception:
             self.report({"ERROR"}, "Can't read driver property '%s'" % d_var_path)
             return {"CANCELLED"}
 
@@ -1399,7 +1584,7 @@ class SDK_OT_key(Operator):
                                     drv_id, d_var_path, idx, d_var_path, x)
                 else:  # ACTION
                     msg = safe_call(key_action_mode, label, s, item, DIRECT_ATTR[kind], axis,
-                                    action, scope_key, drv_id, drv_bone, x)
+                                    action, scope_key, drv_id, drv_bone, d_var_path, x)
                 if msg:
                     problems.append(msg)
                 else:
@@ -1414,7 +1599,7 @@ class SDK_OT_key(Operator):
                                         drv_id, d_var_path, idx, d_var_path, x)
                     else:  # ACTION
                         msg = safe_call(key_action_mode, label, s, item, "rotation_quaternion", i,
-                                        action, scope_key, drv_id, drv_bone, x)
+                                        action, scope_key, drv_id, drv_bone, d_var_path, x)
                     if msg:
                         problems.append(msg)
                     else:
@@ -1435,6 +1620,7 @@ class SDK_OT_key(Operator):
             update_action_constraint_ranges(action, s, scope_key)
 
         context.view_layer.update()
+        invalidate_keys_cache()
         if problems:
             self.report({"WARNING"}, "; ".join(sorted(set(problems))[:3]))
         if not keyed:
@@ -1446,7 +1632,7 @@ class SDK_OT_key(Operator):
 class SDK_OT_delete_key(Operator):
     bl_idname = "sdk.delete_key"
     bl_label = "Delete Key at Driver Value"
-    bl_description = "Remove key at the current driver value from enabled driven channels"
+    bl_description = "Remove key at current driver value from enabled driven channels"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -1458,7 +1644,7 @@ class SDK_OT_delete_key(Operator):
         try:
             val = drv_id.path_resolve(d_var_path)
             x = float(val)
-        except Exception:  # noqa: BLE001
+        except Exception:
             self.report({"ERROR"}, "Can't read driver property")
             return {"CANCELLED"}
 
@@ -1490,7 +1676,10 @@ class SDK_OT_delete_key(Operator):
                             fc.update()
                             removed += 1
                             break
+
+        cleanup_dummy_target_if_unused()
         context.view_layer.update()
+        invalidate_keys_cache()
         self.report({"INFO"}, "Removed %d key(s)" % removed)
         return {"FINISHED"}
 
@@ -1529,13 +1718,13 @@ class SDK_OT_delete_curves(Operator):
                         continue
                     try:
                         target_id.driver_remove(rel_path, p_idx) if p_idx >= 0 else target_id.driver_remove(rel_path)
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         continue
                     removed += 1
                     if ".constraints[" in path:
                         try:
                             set_by_path(obj, path, p_idx, identity_for(path))
-                        except Exception:  # noqa: BLE001
+                        except Exception:
                             pass
 
                 owner = owner_of(item)
@@ -1547,7 +1736,9 @@ class SDK_OT_delete_curves(Operator):
                             if not any(fc.data_path.startswith(prefix) for fc in drivers):
                                 owner.constraints.remove(con)
 
+        cleanup_dummy_target_if_unused()
         context.view_layer.update()
+        invalidate_keys_cache()
         self.report({"INFO"}, "Removed %d driven relationship(s)" % removed)
         return {"FINISHED"}
 
@@ -1608,8 +1799,8 @@ class SDK_PT_main(Panel):
             row.operator("sdk.capture_driver_rest", text="", icon="PINNED")
             row.operator("sdk.driver_to_rest", text="", icon="LOOP_BACK")
 
-            # Keyframe navigation helpers
-            keys = get_all_keyed_values(s)
+            # Keyframe navigation helpers (Cached for UI performance)
+            keys = get_all_keyed_values(s, use_cache=True)
             row = box.row(align=True)
             row.operator("sdk.jump_key", text="Prev Key", icon="PREV_KEYFRAME").direction = "PREV"
             row.operator("sdk.jump_key", text="Next Key", icon="NEXT_KEYFRAME").direction = "NEXT"
@@ -1733,6 +1924,7 @@ def register():
 
 
 def unregister():
+    cleanup_dummy_target_if_unused()
     del bpy.types.Scene.sdk_settings
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
