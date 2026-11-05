@@ -153,6 +153,6 @@ All SDK-created drivers are identifiable by the variable name `sdk_driver`. Clea
 
 ## License / Credits
 
-Authors: OceanMan, CloudKing  
+Authors: OceanMan, CloudKing, Apixelitonomo, U.F.Olive
 
 Feel free to open issues or pull requests on the repository.
