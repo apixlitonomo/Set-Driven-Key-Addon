@@ -5,10 +5,15 @@
 A Blender add-on that brings Maya’s *Set Driven Key* workflow into Blender. Drive any object or bone channel from a controller attribute, author poses by simply posing and pressing **Key**, and manage complex multi-layer corrective setups with a clean UI.
 
 **Addon name (in Blender):** Set Driven Key  
+
 **Version:** 1.5.0  
+
 **Minimum Blender:** 3.0.0  
+
 **Authors:** OceanMan, CloudKing, Apixelitonomo, U.F.Olive
+
 **Location:** 3D Viewport → Sidebar (**N**) → **Driven Key**  
+
 **Category:** Animation  
 
 ---
