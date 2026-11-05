@@ -1,13 +1,14 @@
 bl_info = {
     "name": "Set Driven Key",
     "author": "OceanMan, CloudKing",
-    "version": (1, 2, 0),
+    "version": (1, 4, 0),
     "blender": (3, 0, 0),
     "location": "3D Viewport > Sidebar (N) > Driven Key",
-    "description": "Professional Set Driven Key for Blender with Additive (Delta/Transform), Direct, and Action Constraint modes",
+    "description": "Professional Set Driven Key for Blender with Configuration Manager, Multi-Axis Stacking, Additive, Direct, and Action Constraint modes",
     "category": "Animation",
 }
 
+import json
 import math
 import re
 import traceback
@@ -27,17 +28,15 @@ from bpy.props import (
 from bpy.types import Operator, Panel, PropertyGroup, UIList
 from mathutils import Euler, Quaternion
 
-# Name of the driver variable the add-on creates. Used to identify SDK-managed curves.
+# Name of the driver variable the add-on creates.
 SDK_VAR = "sdk_driver"
 
-# Additive mode on pose bones uses one Transformation constraint per transform kind.
-SDK_CON = {"loc": "SDK Location", "rot": "SDK Rotation", "scale": "SDK Scale"}
+# Constraint naming prefixes
+SDK_CON_BASE = {"loc": "SDK Location", "rot": "SDK Rotation", "scale": "SDK Scale"}
 CON_SUFFIX = {"loc": "", "rot": "_rot", "scale": "_scale"}
-DELTA_ATTR = {"loc": "delta_location", "rot": "delta_rotation_euler", "scale": "delta_scale"}
 DIRECT_ATTR = {"loc": "location", "rot": "rotation_euler", "scale": "scale"}
 
 # Action constraint naming
-SDK_ACTION_CON = "SDK Action"
 SDK_ACTION_PREFIX = "SDK_Action_"
 
 KEY_EPS = 0.01  # Blender treats keys closer than this (on the X axis) as the same key
@@ -50,6 +49,8 @@ DUMMY_TARGET_NAME = "SDK_Constraint_Target"
 # --------------------------------------------------------------------------
 
 _CUSTOM_RE = re.compile(r"^(.+)\[(\d+)\]$")
+_BPY_DATA_RE = re.compile(r"^bpy\.data\.([a-zA-Z0-9_]+)\[[\"\']([^\"\']+)[\"\']\]\.(.+)$")
+_BONE_SUBPATH_RE = re.compile(r"^pose\.bones\[[\"\']([^\"\']+)[\"\']\]\.(.+)$")
 
 
 def parse_custom(text):
@@ -73,11 +74,53 @@ def var_path(path, index):
     return "%s[%d]" % (path, index) if index >= 0 else path
 
 
-def resolve_id_and_path(obj, path):
-    """Determine the host ID block and relative path for driving.
+def resolve_driver_target(s):
+    """Resolve the effective ID block, bone name, relative attribute path, array index,
 
-    Supports Mesh Shape Keys (which live on Key ID blocks) and standard Object data.
+    and driver variable data path for the current driver setting.
+    Handles standard channels, relative custom paths, and full 'bpy.data...' paths.
+    Returns (drv_id, drv_bone, rel_attr, idx, d_var_path, scope_key).
     """
+    layer = getattr(s, "config_layer_tag", "").strip()
+    layer_tag = ("_" + re.sub(r"[^a-zA-Z0-9_]", "_", layer)) if layer else ""
+
+    if s.driver_channel == "CUSTOM":
+        text = s.driver_custom.strip()
+        m_bpy = _BPY_DATA_RE.match(text)
+        if m_bpy:
+            coll_name, id_name, subpath = m_bpy.groups()
+            coll = getattr(bpy.data, coll_name, None)
+            drv_id = coll.get(id_name) if coll else None
+            m_bone = _BONE_SUBPATH_RE.match(subpath)
+            drv_bone = m_bone.group(1) if m_bone else ""
+            rel_attr_raw = m_bone.group(2) if m_bone else subpath
+            rel_attr, idx = parse_custom(rel_attr_raw)
+            d_var_path = subpath
+            clean_sub = re.sub(r"[^a-zA-Z0-9_]", "_", subpath).strip("_")
+            scope_key = "%s_%s%s" % (id_name, clean_sub, layer_tag)
+            return drv_id, drv_bone, rel_attr, idx, d_var_path, scope_key
+
+        rel_attr, idx = parse_custom(text)
+        drv_id = s.driver_obj
+        drv_bone = s.driver_bone
+        d_var_path = full_path(drv_bone, var_path(rel_attr, idx))
+        clean_sub = re.sub(r"[^a-zA-Z0-9_]", "_", d_var_path).strip("_")
+        b_name = drv_bone or (drv_id.name if drv_id else "obj")
+        scope_key = "%s_%s%s" % (b_name, clean_sub, layer_tag)
+        return drv_id, drv_bone, rel_attr, idx, d_var_path, scope_key
+
+    attr, idx = s.driver_channel.split(":")
+    idx = int(idx)
+    drv_id = s.driver_obj
+    drv_bone = s.driver_bone
+    d_var_path = full_path(drv_bone, var_path(attr, idx))
+    b_name = drv_bone or (drv_id.name if drv_id else "obj")
+    scope_key = "%s_%s%s" % (b_name, s.driver_channel.replace(":", "_"), layer_tag)
+    return drv_id, drv_bone, attr, idx, d_var_path, scope_key
+
+
+def resolve_id_and_path(obj, path):
+    """Determine the host ID block and relative path for driving."""
     if path.startswith("data.shape_keys."):
         if obj and hasattr(obj, "data") and hasattr(obj.data, "shape_keys") and obj.data.shape_keys:
             return obj.data.shape_keys, path[len("data.shape_keys."):]
@@ -100,10 +143,7 @@ _IDPROP_RE = re.compile(
 
 
 def set_by_path(obj, path, index, value):
-    """Assign `value` to the property at `path` (optionally an array element).
-
-    Handles RNA attributes, Shape Keys, and custom/ID properties.
-    """
+    """Assign `value` to the property at `path` (optionally an array element)."""
     id_block, rel_path = resolve_id_and_path(obj, path)
     m = _IDPROP_RE.match(rel_path)
     if m:
@@ -156,7 +196,7 @@ def _build_driver_items():
             items.append(("%s:%d" % (attr, i), "%s %s" % (label, c), ""))
     items.append((
         "CUSTOM", "Custom Path...",
-        'Any data path, e.g. ["myprop"], location[2] or modifiers["Bevel"].width',
+        'Any data path, e.g. ["myprop"], location[2] or bpy.data.objects["Rig"].pose.bones["Claw"].scale[0]',
     ))
     return items
 
@@ -191,11 +231,12 @@ def custom_specs(s):
 
 def capture_driver_rest(s):
     """Remember the driver's current value as its rest value."""
-    if s.driver_obj is None:
-        return
     try:
-        rel, idx = driver_spec(s)
-        s.driver_rest = get_value(s.driver_obj, full_path(s.driver_bone, rel), idx)
+        drv_id, drv_bone, rel_attr, idx, d_var_path, scope_key = resolve_driver_target(s)
+        if drv_id is None:
+            return
+        val = drv_id.path_resolve(d_var_path)
+        s.driver_rest = float(val)
     except Exception:  # noqa: BLE001
         pass
 
@@ -226,7 +267,7 @@ def find_driver_fcurve(target_id, path, index):
     idx = max(index, 0)
     try:
         return ad.drivers.find(path, index=idx)
-    except Exception:  # Fallback for older API or custom property paths without index
+    except Exception:
         for fc in ad.drivers:
             if fc.data_path == path and (index < 0 or fc.array_index == idx):
                 return fc
@@ -326,29 +367,33 @@ def safe_call(fn, label, *args):
 
 
 # --------------------------------------------------------------------------
-# Additive mode helpers
+# Additive mode helpers (Multi-axis scoped constraints)
 # --------------------------------------------------------------------------
 
-def additive_targets(item, kind, axis):
+def constraint_name_for(kind, scope_key):
+    """Unique constraint name per configuration and driver axis/channel."""
+    return "%s [%s]" % (SDK_CON_BASE[kind], scope_key)
+
+
+def additive_targets(item, kind, axis, scope_key):
     """(path, index) pairs the SDK drives for one transform channel in additive mode."""
-    if not item.bone:
-        return [(DELTA_ATTR[kind], axis)]
+    con_name = constraint_name_for(kind, scope_key)
     a = "xyz"[axis]
-    rel = 'constraints["%s"].' % SDK_CON[kind]
+    rel = 'constraints["%s"].' % con_name
     return [
         (full_path(item.bone, rel + "to_%s_%s%s" % (m, a, CON_SUFFIX[kind])), -1)
         for m in ("min", "max")
     ]
 
 
-def ensure_constraint(item, kind, mute):
-    """Ensure a Transformation constraint exists on the pose bone."""
-    pb = owner_of(item)
-    name = SDK_CON[kind]
-    con = pb.constraints.get(name)
+def ensure_constraint(item, kind, scope_key, mute):
+    """Ensure a Transformation constraint exists on the pose bone or object."""
+    owner = owner_of(item)
+    con_name = constraint_name_for(kind, scope_key)
+    con = owner.constraints.get(con_name)
     if con is None:
-        con = pb.constraints.new("TRANSFORM")
-        con.name = name
+        con = owner.constraints.new("TRANSFORM")
+        con.name = con_name
         con.owner_space = "LOCAL"
         con.target_space = "LOCAL"
         con.map_from = "LOCATION"
@@ -417,8 +462,8 @@ def reset_base(item, specs):
                 owner.rotation_euler[axis] = item.rest_euler[axis]
 
 
-def key_additive(s, item, kind, axis, drv_obj, d_path, d_idx, d_var_path, x):
-    """Key one transform channel as an offset from the captured base. Returns '' or a message."""
+def key_additive(s, item, kind, axis, drv_obj, d_path, d_idx, d_var_path, scope_key, x):
+    """Key one transform channel as an additive offset. Supports multiple driver axes."""
     obj = item.obj
     owner = owner_of(item)
     if item.bone and obj == drv_obj and item.bone == s.driver_bone:
@@ -430,8 +475,6 @@ def key_additive(s, item, kind, axis, drv_obj, d_path, d_idx, d_var_path, x):
         mode = owner.rotation_mode
         if mode == "AXIS_ANGLE":
             return "Axis-angle rotation isn't supported"
-        if not item.bone and mode == "QUATERNION":
-            return "Additive rotation on objects needs Euler rotation mode"
         base_off = current_euler(owner)[axis] - rest_euler(item, owner)[axis]
         if mode == "QUATERNION":
             base_off = (base_off + math.pi) % (2.0 * math.pi) - math.pi
@@ -441,9 +484,9 @@ def key_additive(s, item, kind, axis, drv_obj, d_path, d_idx, d_var_path, x):
             return "Base scale is zero on %s, can't compute a ratio" % obj.name
         base_off = owner.scale[axis] / rest
 
-    targets = additive_targets(item, kind, axis)
-    for path, idx in targets:
-        if obj == drv_obj and path == d_path and max(idx, 0) == max(d_idx, 0):
+    targets = additive_targets(item, kind, axis, scope_key)
+    for path, p_idx in targets:
+        if obj == drv_obj and path == d_path and max(p_idx, 0) == max(d_idx, 0):
             return "'%s' can't drive itself" % path
 
     ident = 1.0 if kind == "scale" else 0.0
@@ -457,15 +500,13 @@ def key_additive(s, item, kind, axis, drv_obj, d_path, d_idx, d_var_path, x):
                 existing = ident
     value = existing * base_off if kind == "scale" else existing + base_off
 
-    if item.bone:
-        try:
-            ensure_constraint(item, kind, not s.live_preview)
-        except Exception as e:  # noqa: BLE001
-            return "Can't set up constraint on '%s': %s" % (item.bone, e)
+    try:
+        ensure_constraint(item, kind, scope_key, not s.live_preview)
+    except Exception as e:  # noqa: BLE001
+        return "Can't set up constraint on '%s': %s" % (item.bone or obj.name, e)
 
-    for path, idx in targets:
-        mute = False if item.bone else not s.live_preview
-        fc, msg = ensure_driver(obj, path, idx, drv_obj, d_var_path, mute)
+    for path, p_idx in targets:
+        fc, msg = ensure_driver(obj, path, p_idx, drv_obj, d_var_path, not s.live_preview)
         if fc is None:
             return msg
         add_rest_key(s, fc, x, ident)
@@ -503,7 +544,7 @@ def key_direct(s, item, attr, idx, drv_obj, d_path, d_idx, d_var_path, x):
 
 
 # --------------------------------------------------------------------------
-# Action Constraint Mode Helpers
+# Action Constraint Mode Helpers (Multi-axis & dynamic stacking support)
 # --------------------------------------------------------------------------
 
 def action_transform_channel(s):
@@ -517,14 +558,24 @@ def action_transform_channel(s):
     if s.driver_channel.startswith("scale:"):
         idx = int(s.driver_channel.split(":")[1])
         return ("SCALE_X", "SCALE_Y", "SCALE_Z")[idx]
+    if s.driver_channel == "CUSTOM":
+        text = s.driver_custom.strip()
+        m = re.match(r"^(?:.*?\.)?(location|rotation_euler|scale)\[([0-2])\]$", text)
+        if m:
+            tr_type, idx_str = m.groups()
+            comp = ("X", "Y", "Z")[int(idx_str)]
+            prefix = "ROTATION" if "rot" in tr_type else tr_type.upper()
+            return "%s_%s" % (prefix, comp)
     return "LOCATION_X"
 
 
-def get_action_for_driver(s):
+def action_constraint_name_for(scope_key):
+    return "SDK Action [%s]" % scope_key
+
+
+def get_action_for_driver(s, scope_key):
     """Return or create a dedicated Action for the current driver in Action Constraint mode."""
-    driver_name = s.driver_bone if s.driver_bone else (s.driver_obj.name if s.driver_obj else "Driver")
-    chan = s.driver_channel.replace(":", "_")
-    act_name = "%s%s_%s" % (SDK_ACTION_PREFIX, driver_name, chan)
+    act_name = "%s%s" % (SDK_ACTION_PREFIX, scope_key)
     act = bpy.data.actions.get(act_name)
     if act is None:
         act = bpy.data.actions.new(act_name)
@@ -537,15 +588,16 @@ def get_action_for_driver(s):
     return act
 
 
-def ensure_action_constraint(s, item, action):
-    """Ensure an Action constraint exists on the target bone or object."""
+def ensure_action_constraint(s, item, action, scope_key, drv_obj, drv_bone):
+    """Ensure an Action constraint exists on the target bone or object for this driver axis."""
     owner = owner_of(item)
     if owner is None:
         return None, "Target owner not found"
-    con = owner.constraints.get(SDK_ACTION_CON)
+    con_name = action_constraint_name_for(scope_key)
+    con = owner.constraints.get(con_name)
     if con is None:
         con = owner.constraints.new("ACTION")
-        con.name = SDK_ACTION_CON
+        con.name = con_name
         con.target_space = "LOCAL"
         if hasattr(con, "mix_mode"):
             try:
@@ -554,16 +606,16 @@ def ensure_action_constraint(s, item, action):
                 pass
         if hasattr(con, "show_expanded"):
             con.show_expanded = False
-    con.target = s.driver_obj
-    con.subtarget = s.driver_bone or ""
+    con.target = drv_obj
+    con.subtarget = drv_bone or ""
     con.action = action
     con.transform_channel = action_transform_channel(s)
     con.mute = not s.live_preview
     return con, ""
 
 
-def update_action_constraint_ranges(action, s):
-    """Update min/max and frame_start/end across all constraints using this action."""
+def update_action_constraint_ranges(action, s, scope_key):
+    """Update min/max and frame_start/end across constraints using this action."""
     if not action or not action.fcurves:
         return
     points = [kp.co.x for fc in action.fcurves for kp in fc.keyframe_points]
@@ -578,13 +630,14 @@ def update_action_constraint_ranges(action, s):
         val_max = val_min + 1.0
         max_frame = min_frame + 100.0
 
+    con_name = action_constraint_name_for(scope_key)
     seen_owners = set()
     for item in s.driven_items:
         owner = owner_of(item)
         if owner is None or owner.as_pointer() in seen_owners:
             continue
         seen_owners.add(owner.as_pointer())
-        con = owner.constraints.get(SDK_ACTION_CON)
+        con = owner.constraints.get(con_name)
         if con and con.action == action:
             con.frame_start = int(round(min_frame))
             con.frame_end = int(round(max_frame))
@@ -592,10 +645,10 @@ def update_action_constraint_ranges(action, s):
             con.max = val_max
 
 
-def key_action_mode(s, item, attr, idx, action, x):
-    """Key one channel into the shared Action for Action Constraint mode."""
+def key_action_mode(s, item, attr, idx, action, scope_key, drv_obj, drv_bone, x):
+    """Key one channel into the Action for Action Constraint mode."""
     obj = item.obj
-    if item.bone and obj == s.driver_obj and item.bone == s.driver_bone:
+    if item.bone and obj == drv_obj and item.bone == drv_bone:
         return "Bone '%s' can't drive itself" % item.bone
     path = full_path(item.bone, attr)
     try:
@@ -603,7 +656,7 @@ def key_action_mode(s, item, attr, idx, action, x):
     except Exception:  # noqa: BLE001
         return "Can't read '%s'" % var_path(path, idx)
 
-    con, msg = ensure_action_constraint(s, item, action)
+    con, msg = ensure_action_constraint(s, item, action, scope_key, drv_obj, drv_bone)
     if con is None:
         return msg
 
@@ -635,12 +688,13 @@ def key_action_mode(s, item, attr, idx, action, x):
 # Query helpers
 # --------------------------------------------------------------------------
 
-def all_targets(s, item):
+def all_targets(s, item, scope_key=""):
     """Every (path, index) the enabled channels could be driven through."""
     out = []
     for kind, axis in transform_specs(s):
         out.append((full_path(item.bone, DIRECT_ATTR[kind]), axis))
-        out.extend(additive_targets(item, kind, axis))
+        if scope_key:
+            out.extend(additive_targets(item, kind, axis, scope_key))
     for i in quat_specs(s):
         out.append((full_path(item.bone, "rotation_quaternion"), i))
     for rel, idx in custom_specs(s):
@@ -650,13 +704,12 @@ def all_targets(s, item):
 
 def get_all_keyed_values(s):
     """Return sorted unique list of keyed driver values for currently enabled driven channels."""
-    if s.driver_obj is None:
+    drv_id, drv_bone, rel_attr, idx, d_var_path, scope_key = resolve_driver_target(s)
+    if drv_id is None:
         return []
     values = set()
     if s.mode == "ACTION":
-        driver_name = s.driver_bone if s.driver_bone else s.driver_obj.name
-        chan = s.driver_channel.replace(":", "_")
-        act = bpy.data.actions.get("%s%s_%s" % (SDK_ACTION_PREFIX, driver_name, chan))
+        act = bpy.data.actions.get("%s%s" % (SDK_ACTION_PREFIX, scope_key))
         if act:
             for fc in act.fcurves:
                 for kp in fc.keyframe_points:
@@ -667,9 +720,9 @@ def get_all_keyed_values(s):
         obj = item.obj
         if obj is None:
             continue
-        for path, idx in all_targets(s, item):
+        for path, p_idx in all_targets(s, item, scope_key):
             target_id, rel_path = resolve_id_and_path(obj, path)
-            fc = find_driver_fcurve(target_id, rel_path, idx)
+            fc = find_driver_fcurve(target_id, rel_path, p_idx)
             if fc and is_sdk_fcurve(fc):
                 for kp in fc.keyframe_points:
                     values.add(round(kp.co.x, 4))
@@ -677,8 +730,26 @@ def get_all_keyed_values(s):
 
 
 # --------------------------------------------------------------------------
-# Data
+# Configuration Data & Helpers
 # --------------------------------------------------------------------------
+
+class SDK_ConfigItem(PropertyGroup):
+    name: StringProperty(name="Name", default="SDK_Config")
+    driver_obj: PointerProperty(type=bpy.types.Object)
+    driver_bone: StringProperty()
+    driver_channel: StringProperty(default="location:0")
+    driver_custom: StringProperty()
+    driver_rest: FloatProperty(default=0.0)
+    mode: StringProperty(default="ADDITIVE")
+    config_layer_tag: StringProperty(default="")
+    ch_loc: BoolVectorProperty(size=3, default=(False,) * 3)
+    ch_rot: BoolVectorProperty(size=3, default=(False,) * 3)
+    ch_quat: BoolVectorProperty(size=4, default=(False,) * 4)
+    ch_scale: BoolVectorProperty(size=3, default=(False,) * 3)
+    ch_custom: StringProperty(default="")
+    # Serialized driven targets: list of (obj_name, bone_name)
+    driven_data: StringProperty(default="[]")
+
 
 def _preview_update(self, context):
     """Toggle SDK effect on/off so animators can inspect raw base values."""
@@ -692,14 +763,9 @@ def _preview_update(self, context):
         ad = obj.animation_data
         if ad:
             for fc in ad.drivers:
-                if not is_sdk_fcurve(fc) or ".constraints[" in fc.data_path:
+                if not is_sdk_fcurve(fc):
                     continue
                 fc.mute = not on
-                if not on and fc.data_path.startswith("delta_"):
-                    try:
-                        set_by_path(obj, fc.data_path, fc.array_index, identity_for(fc.data_path))
-                    except Exception:  # noqa: BLE001
-                        pass
         if hasattr(obj, "data") and hasattr(obj.data, "shape_keys") and obj.data.shape_keys:
             sk_ad = obj.data.shape_keys.animation_data
             if sk_ad:
@@ -709,10 +775,10 @@ def _preview_update(self, context):
         if obj.pose:
             for pb in obj.pose.bones:
                 for con in pb.constraints:
-                    if con.name in SDK_CON.values() or con.name == SDK_ACTION_CON:
+                    if con.name.startswith("SDK "):
                         con.mute = not on
         for con in obj.constraints:
-            if con.name == SDK_ACTION_CON:
+            if con.name.startswith("SDK "):
                 con.mute = not on
 
 
@@ -721,21 +787,22 @@ def _driver_changed(self, context):
 
 
 def _driver_current_get(self):
-    if self.driver_obj is None:
-        return 0.0
     try:
-        rel, idx = driver_spec(self)
-        return get_value(self.driver_obj, full_path(self.driver_bone, rel), idx)
+        drv_id, drv_bone, rel_attr, idx, d_var_path, scope_key = resolve_driver_target(self)
+        if drv_id is None:
+            return 0.0
+        val = drv_id.path_resolve(d_var_path)
+        return float(val)
     except Exception:  # noqa: BLE001
         return 0.0
 
 
 def _driver_current_set(self, value):
-    if self.driver_obj is None:
-        return
     try:
-        rel, idx = driver_spec(self)
-        set_by_path(self.driver_obj, full_path(self.driver_bone, rel), idx, value)
+        drv_id, drv_bone, rel_attr, idx, d_var_path, scope_key = resolve_driver_target(self)
+        if drv_id is None:
+            return
+        set_by_path(drv_id, d_var_path, -1, value)
         if bpy.context:
             bpy.context.view_layer.update()
     except Exception:  # noqa: BLE001
@@ -752,6 +819,16 @@ class SDK_DrivenItem(PropertyGroup):
 
 
 class SDK_Settings(PropertyGroup):
+    # Configurations
+    configs: CollectionProperty(type=SDK_ConfigItem)
+    config_index: IntProperty(default=0)
+    config_layer_tag: StringProperty(
+        name="Layer Tag",
+        description="Unique tag for this configuration layer. When set, creates a new stacked "
+                    "transform constraint / action layer instead of overwriting existing ones",
+        default="",
+    )
+
     # Driver
     driver_obj: PointerProperty(type=bpy.types.Object)
     driver_bone: StringProperty()
@@ -760,7 +837,8 @@ class SDK_Settings(PropertyGroup):
         description="Driver channel", update=_driver_changed,
     )
     driver_custom: StringProperty(
-        name="Path", description='Data path, e.g. ["myprop"], location[2] or modifiers["Bevel"].width',
+        name="Path",
+        description='Data path, e.g. ["myprop"], location[2] or bpy.data.objects["Rig"].pose.bones["Claw"].scale[0]',
         update=_driver_changed,
     )
     driver_rest: FloatProperty(
@@ -798,9 +876,9 @@ class SDK_Settings(PropertyGroup):
     mode: EnumProperty(
         name="Mode",
         items=[
-            ("ADDITIVE", "Additive",
-             "Non-destructive: driven offsets stack on top of base animation "
-             "(delta transforms on objects, Transformation constraints on bones)"),
+            ("ADDITIVE", "Additive (Multi-Axis)",
+             "Non-destructive: driven offsets stack on top of base animation. "
+             "Allows multiple driver axes, bones, and layers to drive channels simultaneously"),
             ("DIRECT", "Direct",
              "Maya-style: driver takes over channels directly"),
             ("ACTION", "Action Constraint",
@@ -811,7 +889,7 @@ class SDK_Settings(PropertyGroup):
     )
     auto_reset: BoolProperty(
         name="Reset to Base after Key",
-        description="After keying, put posed channels back to the captured base (Additive mode)",
+        description="After keying, put posed channels back to the captured base (Additive & Action modes)",
         default=True,
     )
     interpolation: EnumProperty(
@@ -840,7 +918,133 @@ class SDK_Settings(PropertyGroup):
 
 
 # --------------------------------------------------------------------------
-# Operators
+# Configuration Operators
+# --------------------------------------------------------------------------
+
+class SDK_OT_config_add(Operator):
+    bl_idname = "sdk.config_add"
+    bl_label = "Save Current as Configuration"
+    bl_description = "Save current driver, driven targets, channels, and layer tag as a named configuration"
+    bl_options = {"REGISTER", "UNDO"}
+
+    name: StringProperty(name="Name", default="New_SDK_Config")
+
+    def execute(self, context):
+        s = context.scene.sdk_settings
+        cfg = s.configs.add()
+        cfg.name = self.name or ("Config_%d" % len(s.configs))
+        cfg.driver_obj = s.driver_obj
+        cfg.driver_bone = s.driver_bone
+        cfg.driver_channel = s.driver_channel
+        cfg.driver_custom = s.driver_custom
+        cfg.driver_rest = s.driver_rest
+        cfg.mode = s.mode
+        cfg.config_layer_tag = s.config_layer_tag or cfg.name
+        cfg.ch_loc = s.ch_loc
+        cfg.ch_rot = s.ch_rot
+        cfg.ch_quat = s.ch_quat
+        cfg.ch_scale = s.ch_scale
+        cfg.ch_custom = s.ch_custom
+        driven_list = [(it.obj.name if it.obj else "", it.bone) for it in s.driven_items]
+        cfg.driven_data = json.dumps(driven_list)
+        s.config_index = len(s.configs) - 1
+        self.report({"INFO"}, "Saved configuration '%s'" % cfg.name)
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        s = context.scene.sdk_settings
+        b_name = s.driver_bone or (s.driver_obj.name if s.driver_obj else "Rig")
+        chan = s.driver_channel.replace(":", "_")
+        self.name = "%s_%s" % (b_name, chan)
+        return context.window_manager.invoke_props_dialog(self)
+
+
+class SDK_OT_config_load(Operator):
+    bl_idname = "sdk.config_load"
+    bl_label = "Load Configuration"
+    bl_description = "Restore driver, targets, channels, and layer settings from selected configuration"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        s = context.scene.sdk_settings
+        if not (0 <= s.config_index < len(s.configs)):
+            self.report({"ERROR"}, "No configuration selected")
+            return {"CANCELLED"}
+        cfg = s.configs[s.config_index]
+        s.driver_obj = cfg.driver_obj
+        s.driver_bone = cfg.driver_bone
+        s.driver_channel = cfg.driver_channel
+        s.driver_custom = cfg.driver_custom
+        s.driver_rest = cfg.driver_rest
+        s.mode = cfg.mode
+        s.config_layer_tag = cfg.config_layer_tag
+        s.ch_loc = cfg.ch_loc
+        s.ch_rot = cfg.ch_rot
+        s.ch_quat = cfg.ch_quat
+        s.ch_scale = cfg.ch_scale
+        s.ch_custom = cfg.ch_custom
+
+        # Restore driven items
+        try:
+            driven_list = json.loads(cfg.driven_data)
+            s.driven_items.clear()
+            for obj_name, bone_name in driven_list:
+                obj = bpy.data.objects.get(obj_name)
+                if obj:
+                    item = s.driven_items.add()
+                    item.obj = obj
+                    item.bone = bone_name
+                    capture(item)
+        except Exception as e:  # noqa: BLE001
+            self.report({"WARNING"}, "Could not fully restore driven targets: %s" % e)
+
+        self.report({"INFO"}, "Loaded configuration '%s'" % cfg.name)
+        return {"FINISHED"}
+
+
+class SDK_OT_config_remove(Operator):
+    bl_idname = "sdk.config_remove"
+    bl_label = "Remove Configuration"
+    bl_description = "Remove the selected configuration from the list"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        s = context.scene.sdk_settings
+        if 0 <= s.config_index < len(s.configs):
+            s.configs.remove(s.config_index)
+            s.config_index = max(0, s.config_index - 1)
+        return {"FINISHED"}
+
+
+class SDK_UL_configs(UIList):
+    """UIList for saved SDK Configurations with live search and filtering."""
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if self.layout_type in {"DEFAULT", "COMPACT"}:
+            row = layout.row(align=True)
+            row.prop(item, "name", text="", emboss=False, icon="SCRIPTPLUGINS")
+            tag_text = ("[" + item.config_layer_tag + "]") if item.config_layer_tag else ""
+            row.label(text=tag_text)
+        elif self.layout_type == "GRID":
+            layout.alignment = "CENTER"
+            layout.label(text=item.name, icon="SCRIPTPLUGINS")
+
+    def filter_items(self, context, data, propname):
+        items = getattr(data, propname)
+        flt_flags = []
+        flt_neworder = []
+        if self.filter_name:
+            flt_flags = [
+                self.bitflag_filter_item
+                if (self.filter_name.lower() in item.name.lower() or self.filter_name.lower() in item.config_layer_tag.lower())
+                else 0
+                for item in items
+            ]
+        return flt_flags, flt_neworder
+
+
+# --------------------------------------------------------------------------
+# Main SDK Operators
 # --------------------------------------------------------------------------
 
 class SDK_OT_load_driver(Operator):
@@ -881,12 +1085,12 @@ class SDK_OT_driver_to_rest(Operator):
 
     def execute(self, context):
         s = context.scene.sdk_settings
-        if s.driver_obj is None:
+        drv_id, drv_bone, rel_attr, idx, d_var_path, scope_key = resolve_driver_target(s)
+        if drv_id is None:
             self.report({"ERROR"}, "Load a driver first")
             return {"CANCELLED"}
-        rel, idx = driver_spec(s)
         try:
-            set_by_path(s.driver_obj, full_path(s.driver_bone, rel), idx, s.driver_rest)
+            set_by_path(drv_id, d_var_path, -1, s.driver_rest)
         except Exception as e:  # noqa: BLE001
             self.report({"ERROR"}, "Can't set driver value: %s" % e)
             return {"CANCELLED"}
@@ -904,12 +1108,16 @@ class SDK_OT_jump_key(Operator):
 
     def execute(self, context):
         s = context.scene.sdk_settings
-        if s.driver_obj is None:
+        drv_id, drv_bone, rel_attr, idx, d_var_path, scope_key = resolve_driver_target(s)
+        if drv_id is None:
             self.report({"ERROR"}, "Load a driver first")
             return {"CANCELLED"}
-        rel, idx = driver_spec(s)
-        path = full_path(s.driver_bone, rel)
-        cur = get_value(s.driver_obj, path, idx)
+        try:
+            cur = float(drv_id.path_resolve(d_var_path))
+        except Exception:  # noqa: BLE001
+            self.report({"ERROR"}, "Can't read driver value")
+            return {"CANCELLED"}
+
         keys = get_all_keyed_values(s)
         if not keys:
             self.report({"INFO"}, "No keys found on driven channels")
@@ -933,7 +1141,7 @@ class SDK_OT_jump_key(Operator):
             self.report({"INFO"}, "No more keys in that direction")
             return {"CANCELLED"}
 
-        set_by_path(s.driver_obj, path, idx, target)
+        set_by_path(drv_id, d_var_path, -1, target)
         context.view_layer.update()
         self.report({"INFO"}, "Jumped to driver key: %.4f" % target)
         return {"FINISHED"}
@@ -1089,12 +1297,10 @@ class SDK_OT_mirror_keys(Operator):
 
     def execute(self, context):
         s = context.scene.sdk_settings
-        if s.driver_obj is None:
+        drv_id, drv_bone, rel_attr, idx, d_var_path, scope_key = resolve_driver_target(s)
+        if drv_id is None:
             self.report({"ERROR"}, "Load a driver first")
             return {"CANCELLED"}
-        d_rel, d_idx = driver_spec(s)
-        d_path = full_path(s.driver_bone, d_rel)
-        d_var_path = var_path(d_path, d_idx)
 
         def flip_name(name):
             patterns = [
@@ -1125,7 +1331,7 @@ class SDK_OT_mirror_keys(Operator):
                     continue
 
                 flip_sign = -1.0 if (axis == 0 and kind in ("loc", "rot")) else 1.0
-                dst_fc, msg = ensure_driver(item.obj, dst_path, axis, s.driver_obj, d_var_path, not s.live_preview)
+                dst_fc, msg = ensure_driver(item.obj, dst_path, axis, drv_id, d_var_path, not s.live_preview)
                 if dst_fc:
                     while len(dst_fc.keyframe_points):
                         dst_fc.keyframe_points.remove(dst_fc.keyframe_points[0], fast=True)
@@ -1146,16 +1352,14 @@ class SDK_OT_key(Operator):
 
     def execute(self, context):
         s = context.scene.sdk_settings
-        drv_obj = s.driver_obj
-        if drv_obj is None:
+        drv_id, drv_bone, rel_attr, idx, d_var_path, scope_key = resolve_driver_target(s)
+        if drv_id is None:
             self.report({"ERROR"}, "Load a driver first")
             return {"CANCELLED"}
 
-        d_rel, d_idx = driver_spec(s)
-        d_path = full_path(s.driver_bone, d_rel)
-        d_var_path = var_path(d_path, d_idx)
         try:
-            x = get_value(drv_obj, d_path, d_idx)
+            val = drv_id.path_resolve(d_var_path)
+            x = float(val)
         except Exception:  # noqa: BLE001
             self.report({"ERROR"}, "Can't read driver property '%s'" % d_var_path)
             return {"CANCELLED"}
@@ -1174,7 +1378,7 @@ class SDK_OT_key(Operator):
             problems.append("Quaternion channels are Direct-mode only")
 
         keyed = 0
-        action = get_action_for_driver(s) if mode == "ACTION" else None
+        action = get_action_for_driver(s, scope_key) if mode == "ACTION" else None
 
         for item in s.driven_items:
             obj = item.obj
@@ -1189,12 +1393,13 @@ class SDK_OT_key(Operator):
                 label = "%s %s%s" % (item.bone or obj.name, kind, "XYZ"[axis])
                 if mode == "ADDITIVE":
                     msg = safe_call(key_additive, label, s, item, kind, axis,
-                                    drv_obj, d_path, d_idx, d_var_path, x)
+                                    drv_id, d_var_path, idx, d_var_path, scope_key, x)
                 elif mode == "DIRECT":
                     msg = safe_call(key_direct, label, s, item, DIRECT_ATTR[kind], axis,
-                                    drv_obj, d_path, d_idx, d_var_path, x)
+                                    drv_id, d_var_path, idx, d_var_path, x)
                 else:  # ACTION
-                    msg = safe_call(key_action_mode, label, s, item, DIRECT_ATTR[kind], axis, action, x)
+                    msg = safe_call(key_action_mode, label, s, item, DIRECT_ATTR[kind], axis,
+                                    action, scope_key, drv_id, drv_bone, x)
                 if msg:
                     problems.append(msg)
                 else:
@@ -1206,17 +1411,18 @@ class SDK_OT_key(Operator):
                     label = "%s quat %s" % (item.bone or obj.name, "WXYZ"[i])
                     if mode == "DIRECT":
                         msg = safe_call(key_direct, label, s, item, "rotation_quaternion", i,
-                                        drv_obj, d_path, d_idx, d_var_path, x)
+                                        drv_id, d_var_path, idx, d_var_path, x)
                     else:  # ACTION
-                        msg = safe_call(key_action_mode, label, s, item, "rotation_quaternion", i, action, x)
+                        msg = safe_call(key_action_mode, label, s, item, "rotation_quaternion", i,
+                                        action, scope_key, drv_id, drv_bone, x)
                     if msg:
                         problems.append(msg)
                     else:
                         keyed += 1
 
-            for rel, idx in cspecs:
+            for rel, c_idx in cspecs:
                 label = "%s %s" % (item.bone or obj.name, rel)
-                msg = safe_call(key_direct, label, s, item, rel, idx, drv_obj, d_path, d_idx, d_var_path, x)
+                msg = safe_call(key_direct, label, s, item, rel, c_idx, drv_id, d_var_path, idx, d_var_path, x)
                 if msg:
                     problems.append(msg)
                 else:
@@ -1226,7 +1432,7 @@ class SDK_OT_key(Operator):
                 reset_base(item, done)
 
         if mode == "ACTION" and action:
-            update_action_constraint_ranges(action, s)
+            update_action_constraint_ranges(action, s, scope_key)
 
         context.view_layer.update()
         if problems:
@@ -1245,21 +1451,20 @@ class SDK_OT_delete_key(Operator):
 
     def execute(self, context):
         s = context.scene.sdk_settings
-        if s.driver_obj is None:
+        drv_id, drv_bone, rel_attr, idx, d_var_path, scope_key = resolve_driver_target(s)
+        if drv_id is None:
             self.report({"ERROR"}, "Load a driver first")
             return {"CANCELLED"}
-        d_rel, d_idx = driver_spec(s)
         try:
-            x = get_value(s.driver_obj, full_path(s.driver_bone, d_rel), d_idx)
+            val = drv_id.path_resolve(d_var_path)
+            x = float(val)
         except Exception:  # noqa: BLE001
             self.report({"ERROR"}, "Can't read driver property")
             return {"CANCELLED"}
 
         removed = 0
         if s.mode == "ACTION":
-            driver_name = s.driver_bone if s.driver_bone else s.driver_obj.name
-            chan = s.driver_channel.replace(":", "_")
-            act = bpy.data.actions.get("%s%s_%s" % (SDK_ACTION_PREFIX, driver_name, chan))
+            act = bpy.data.actions.get("%s%s" % (SDK_ACTION_PREFIX, scope_key))
             if act:
                 frame = x * 100.0
                 for fc in list(act.fcurves):
@@ -1268,15 +1473,15 @@ class SDK_OT_delete_key(Operator):
                             fc.keyframe_points.remove(kp)
                             fc.update()
                             removed += 1
-                update_action_constraint_ranges(act, s)
+                update_action_constraint_ranges(act, s, scope_key)
         else:
             for item in s.driven_items:
                 obj = item.obj
                 if obj is None:
                     continue
-                for path, idx in all_targets(s, item):
+                for path, p_idx in all_targets(s, item, scope_key):
                     target_id, rel_path = resolve_id_and_path(obj, path)
-                    fc = find_driver_fcurve(target_id, rel_path, idx)
+                    fc = find_driver_fcurve(target_id, rel_path, p_idx)
                     if fc is None or not is_sdk_fcurve(fc):
                         continue
                     for kp in list(fc.keyframe_points):
@@ -1298,16 +1503,16 @@ class SDK_OT_delete_curves(Operator):
 
     def execute(self, context):
         s = context.scene.sdk_settings
+        drv_id, drv_bone, rel_attr, idx, d_var_path, scope_key = resolve_driver_target(s)
         removed = 0
 
         if s.mode == "ACTION":
-            driver_name = s.driver_bone if s.driver_bone else (s.driver_obj.name if s.driver_obj else "Driver")
-            chan = s.driver_channel.replace(":", "_")
-            act = bpy.data.actions.get("%s%s_%s" % (SDK_ACTION_PREFIX, driver_name, chan))
+            act = bpy.data.actions.get("%s%s" % (SDK_ACTION_PREFIX, scope_key))
+            con_name = action_constraint_name_for(scope_key)
             for item in s.driven_items:
                 owner = owner_of(item)
-                if owner and SDK_ACTION_CON in owner.constraints:
-                    con = owner.constraints[SDK_ACTION_CON]
+                if owner and con_name in owner.constraints:
+                    con = owner.constraints[con_name]
                     owner.constraints.remove(con)
                     removed += 1
             if act and act.users <= 1:
@@ -1317,32 +1522,30 @@ class SDK_OT_delete_curves(Operator):
                 obj = item.obj
                 if obj is None:
                     continue
-                for path, idx in all_targets(s, item):
+                for path, p_idx in all_targets(s, item, scope_key):
                     target_id, rel_path = resolve_id_and_path(obj, path)
-                    fc = find_driver_fcurve(target_id, rel_path, idx)
+                    fc = find_driver_fcurve(target_id, rel_path, p_idx)
                     if fc is None or not is_sdk_fcurve(fc):
                         continue
                     try:
-                        target_id.driver_remove(rel_path, idx) if idx >= 0 else target_id.driver_remove(rel_path)
+                        target_id.driver_remove(rel_path, p_idx) if p_idx >= 0 else target_id.driver_remove(rel_path)
                     except Exception:  # noqa: BLE001
                         continue
                     removed += 1
-                    if path.startswith("delta_") or ".constraints[" in path:
+                    if ".constraints[" in path:
                         try:
-                            set_by_path(obj, path, idx, identity_for(path))
+                            set_by_path(obj, path, p_idx, identity_for(path))
                         except Exception:  # noqa: BLE001
                             pass
 
-                if item.bone and obj.pose and item.bone in obj.pose.bones:
-                    pb = obj.pose.bones[item.bone]
-                    drivers = list(obj.animation_data.drivers) if obj.animation_data else []
-                    for name in SDK_CON.values():
-                        con = pb.constraints.get(name)
-                        if con is None:
-                            continue
-                        prefix = full_path(item.bone, 'constraints["%s"]' % name)
-                        if not any(fc.data_path.startswith(prefix) for fc in drivers):
-                            pb.constraints.remove(con)
+                owner = owner_of(item)
+                if owner and obj.animation_data:
+                    drivers = list(obj.animation_data.drivers)
+                    for con in list(owner.constraints):
+                        if con.name.startswith("SDK "):
+                            prefix = full_path(item.bone, 'constraints["%s"]' % con.name)
+                            if not any(fc.data_path.startswith(prefix) for fc in drivers):
+                                owner.constraints.remove(con)
 
         context.view_layer.update()
         self.report({"INFO"}, "Removed %d driven relationship(s)" % removed)
@@ -1374,13 +1577,28 @@ class SDK_PT_main(Panel):
         layout = self.layout
         s = context.scene.sdk_settings
 
+        # ---- Configurations Manager ---------------------------------------
+        box = layout.box()
+        box.label(text="Configurations", icon="PRESET")
+        row = box.row(align=True)
+        row.template_list("SDK_UL_configs", "", s, "configs", s, "config_index", rows=3)
+        col = row.column(align=True)
+        col.operator("sdk.config_add", text="", icon="ADD")
+        col.operator("sdk.config_remove", text="", icon="REMOVE")
+        col.operator("sdk.config_load", text="", icon="IMPORT")
+
+        row = box.row(align=True)
+        row.prop(s, "config_layer_tag", text="Layer Tag")
+        row.operator("sdk.config_load", text="Load / Activate", icon="CHECKMARK")
+
         # ---- Driver -------------------------------------------------------
         box = layout.box()
         box.label(text="Driver", icon="DRIVER")
         box.operator("sdk.load_driver", icon="EYEDROPPER")
-        if s.driver_obj:
-            name = s.driver_obj.name + (" : " + s.driver_bone if s.driver_bone else "")
-            box.label(text=name, icon="BONE_DATA" if s.driver_bone else "OBJECT_DATA")
+        drv_id, drv_bone, rel_attr, idx, d_var_path, scope_key = resolve_driver_target(s)
+        if drv_id:
+            name = drv_id.name + (" : " + drv_bone if drv_bone else "")
+            box.label(text=name, icon="BONE_DATA" if drv_bone else "OBJECT_DATA")
             box.prop(s, "driver_channel", text="")
             if s.driver_channel == "CUSTOM":
                 box.prop(s, "driver_custom")
@@ -1440,7 +1658,7 @@ class SDK_PT_main(Panel):
         # ---- Mode ---------------------------------------------------------
         layout.prop(s, "mode")
         layout.prop(s, "auto_rest_key")
-        if s.mode == "ADDITIVE":
+        if s.mode == "ADDITIVE" or s.mode == "ACTION":
             row = layout.row(align=True)
             row.operator("sdk.capture_base", icon="PINNED")
             row.operator("sdk.reset_base", icon="LOOP_BACK")
@@ -1481,8 +1699,12 @@ class SDK_PT_options(Panel):
 # --------------------------------------------------------------------------
 
 classes = (
+    SDK_ConfigItem,
     SDK_DrivenItem,
     SDK_Settings,
+    SDK_OT_config_add,
+    SDK_OT_config_load,
+    SDK_OT_config_remove,
     SDK_OT_load_driver,
     SDK_OT_capture_driver_rest,
     SDK_OT_driver_to_rest,
@@ -1497,6 +1719,7 @@ classes = (
     SDK_OT_key,
     SDK_OT_delete_key,
     SDK_OT_delete_curves,
+    SDK_UL_configs,
     SDK_UL_driven,
     SDK_PT_main,
     SDK_PT_options,
