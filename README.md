@@ -3,7 +3,7 @@
 **Maya-style Set Driven Key for Blender** — drive object or bone channels from any controller, with **Configurations Manager**, **Dynamic Multi-Axis Stacking**, **Additive**, **Direct**, and **Action Constraint** modes, designed for professional character rigging and high viewport performance at scale.
 
 **Addon name (in Blender):** Set Driven Key  
-**Version:** 1.4.0
+**Version:** 1.5.0
 **Minimum Blender:** 3.0.0  
 **Authors:** Oceanman, CloudKing  
 **Location:** 3D Viewport → Sidebar (**N**) → **Driven Key**  
@@ -40,7 +40,7 @@ This add-on provides an industry-standard interface to:
 |------|-----------|---------------|
 | **Additive (Multi-Axis)** (default) | Non-destructive. Offsets stack on top of base animation. Allows multiple driver axes, bones, and layers to drive the same target channels simultaneously. | Corrective shapes, secondary joint motion, multi-axis corrective setups, and stacking offsets over animator keyframes. |
 | **Direct** | Maya-style direct control. The driver takes over the channel and sets its value directly. High-performance evaluation. | Mechanical rigs, foot rolls, finger curls, simple switches, and mesh Shape Keys. |
-| **Action Constraint** | Drives an Action Constraint evaluation range. Keyframes are stored into a unified Action data-block per driver axis, evaluating multi-bone / multi-channel poses natively. | Complex facial rigs, corrective pose libraries, multi-bone secondary setups, and maximum rig cleanliness. |
+| **Action Constraint** | Drives an Action Constraint evaluation range. Keyframes are stored into a unified Action data-block per driver axis, evaluating multi-bone / multi-channel poses natively. Supports both transform channels and custom driver properties. | Complex facial rigs, corrective pose libraries, multi-bone secondary setups, and maximum rig cleanliness. |
 
 ### Driver Controls & Full Data Paths
 
@@ -52,21 +52,22 @@ This add-on provides an industry-standard interface to:
   - Standard relative paths: `["myprop"]`, `location[2]`
 - **Interactive Scrubber:** Scrub the driver property directly from the panel without switching views.
 - **Key Navigation:** **Prev Key** and **Next Key** buttons jump the driver directly to authored key values.
-- **Visual Key Indicator:** Lists existing driver key values for the enabled channels.
+- **Visual Key Indicator:** Lists existing driver key values for the enabled channels (cached for smooth UI redrawing).
 - **Rest value helpers:** Capture Driver Rest, Driver to Rest.
 
 ### Driven Targets & Channels
 
 - Load **selected objects** or **selected pose bones** in Pose Mode.
 - **Channel Presets:** Quick one-click buttons for `All`, `Loc`, `Rot`, `Scale`, and `Clear`.
-- **Mesh Shape Keys:** One-click **Add Mesh Shape Keys** button extracts all non-basis shape keys on the active mesh and links them into driven channels.
+- **Mesh Shape Keys:** One-click **Add Mesh Shape Keys** button automatically adds the active mesh object to driven targets, captures its base, and extracts all non-basis shape keys into driven channels.
 - Base pose snapshotting for Additive math.
 
 ### Rigging & Symmetry Tools
 
-- **Mirror / Flip (`.L` <-> `.R`):** Copy and mirror SDK drivers and curves from left to right (or right to left) with proper axis flipping across symmetrical bones.
+- **Mirror / Flip (`.L` <-> `.R`):** Copy and mirror SDK drivers, constraints, and curves across all modes (Direct, Additive, and Action Constraint) with proper axis flipping across symmetrical bones.
 - **High Viewport Performance at Scale:**
   - Optimized driver lookup using native collection indexing `animation_data.drivers.find(path, index)` (O(1) lookups instead of O(N) linear scans).
+  - Keyframe list caching to keep UI redraw overhead at zero.
   - Handles rigs with thousands of bones and driven channels with smooth viewport playback (>200 FPS).
 - **Auto Rest Key:** Automatically keys the rest state when a curve gets its first key, ensuring channels return to base when the driver returns to rest.
 - **Reset to Base after Key:** Automatically restores posed channels back to base after keying in Additive and Action modes.
@@ -75,7 +76,7 @@ This add-on provides an industry-standard interface to:
 ### Editing & Cleanup
 
 - **Delete Key at Driver Value:** Removes keys at the current driver value across enabled driven channels or the active Action.
-- **Delete Driven Curves:** Cleans up SDK drivers, unused constraints, and generated Actions while restoring default transforms.
+- **Delete Driven Curves:** Cleans up SDK drivers, unused constraints, generated Actions, and dummy targets while restoring default transforms.
 - **Live Preview:** WYSIWYG toggle to enable/mute SDK evaluation so you can inspect raw poses.
 
 ---
