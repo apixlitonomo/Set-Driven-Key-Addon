@@ -6,7 +6,7 @@ A Blender add-on that brings Maya’s *Set Driven Key* workflow into Blender. Dr
 
 **Addon name (in Blender):** Set Driven Key  
 
-**Version:** 1.5.0  
+**Version:** 3.5.0  
 
 **Minimum Blender:** 3.0.0  
 
