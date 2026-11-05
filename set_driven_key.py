@@ -31,7 +31,7 @@
 
 bl_info = {
     "name": "Set Driven Key",
-    "author": "OceanMan, CloudKing",
+    "author": "OceanMan, CloudKing, Apixelitonomo, U.F.Olive",
     "version": (1, 5, 0),
     "blender": (3, 0, 0),
     "location": "3D Viewport > Sidebar (N) > Driven Key",
