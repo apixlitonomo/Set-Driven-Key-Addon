@@ -1,160 +1,163 @@
 # Set Driven Key
 
-**Maya-style Set Driven Key for Blender** — drive object or bone channels from a controller, with an optional **additive** mode so offsets stack on top of your own animation.
+**Maya-style Set Driven Key for Blender**
+
+A Blender add-on that brings Maya’s *Set Driven Key* workflow into Blender. Drive any object or bone channel from a controller attribute, author poses by simply posing and pressing **Key**, and manage complex multi-layer corrective setups with a clean UI.
 
 **Addon name (in Blender):** Set Driven Key  
-**Version:** 1.1.0  
+
+**Version:** 3.5.0  
+
 **Minimum Blender:** 3.0.0  
-**Authors:** Oceanman, CloudKing  
+
+**Authors:** OceanMan, CloudKing, Apixelitonomo, U.F.Olive
+
 **Location:** 3D Viewport → Sidebar (**N**) → **Driven Key**  
-**Category:** Animation
+
+**Category:** Animation  
 
 ---
 
-## Overview
+## Quick Introduction
 
-In Maya, **Set Driven Key** links one attribute (the *driver*) to others (the *driven*) so changing the driver value moves the driven channels through authored poses. Blender can do this with drivers and Action constraints, but the setup is manual and tedious.
+In Maya, Set Driven Key lets you link one attribute (the *driver*) to one or more other attributes (the *driven*). Moving the driver automatically moves the driven channels through the poses you authored.
 
-This add-on provides a focused UI to:
+Blender can achieve the same result with drivers and Action constraints, but the manual setup is slow, fragile, and easy to break—especially when you need multiple controllers, corrective layers, or shape keys.
 
-1. Load a **driver** (object or pose bone + channel)
-2. Load **driven** targets (objects or bones)
-3. Enable the channels to drive (location / rotation / scale / quaternion / custom paths)
-4. Pose and press **Key**
+This add-on gives you a focused, Maya-like interface that:
 
-Under the hood it creates **driver F-curves** keyed by the driver value (not by time). It only manages curves that use the add-on’s own driver variable (`sdk_driver`), so hand-made drivers are left alone.
+- Loads a driver (object / pose bone + channel or any custom data path)
+- Loads driven targets (objects, bones, or mesh shape keys)
+- Lets you pose and press **Key**
+- Supports three evaluation modes (Additive, Direct, Action Constraint)
+- Saves named configurations so you can stack multiple independent driver layers
+- Provides scrubbing, key navigation, symmetry mirroring, and cleanup tools
+
+Ideal for character rigging: corrective shapes, secondary motion, foot rolls, finger curls, facial systems, and multi-axis driven setups—while tring to stay performant even on large rigs.
+
+---
+
+## How It Works Internally
+
+The add-on never invents a new evaluation system. It builds standard Blender animation data (drivers, Transformation constraints, or Action constraints) in a structured, reversible way and manages them through a single scene settings block (`scene.sdk_settings`).
+
+### Core Data Model
+
+- **`SDK_Settings`** (scene property) holds the current driver, driven list, channel toggles, mode, interpolation, rest value, layer tag, and a collection of saved configurations.
+- **`SDK_DrivenItem`** stores a pointer to an object (and optional bone name) plus a snapshot of its base/rest transform (location, Euler, quaternion, scale). This snapshot is the reference for Additive offset math.
+- **`SDK_ConfigItem`** serializes a complete setup (driver, channels, mode, layer tag, driven targets) so it can be reloaded or stacked later.
+
+Automatic Driver resolution supports:
+
+- Standard channels (`location:0`, `rotation_euler:1`, `scale:2`, quaternion components, …)
+- Relative custom paths (`["myprop"]`, `location[2]`)
+- Full absolute paths (`bpy.data.objects["Armature"].pose.bones["Claw"].scale[0]`)
+- Shape-key paths (`data.shape_keys.key_blocks["Smile"].value`)
+
+A scope key is derived from the driver identity + optional **Layer Tag**. This key is embedded in constraint/action names so multiple configurations can coexist without overwriting each other.
+
+### The Three Modes
+
+#### 1. Direct Mode
+Classic Maya-style takeover.
+
+- A normal Blender driver is added directly on the driven channel.
+- The driver variable is named `sdk_driver` and points at the controller’s data path.
+- Keyframes are written on the driver f-curve: X = driver value, Y = driven value.
+- When the driver changes, Blender evaluates the curve and sets the channel.
+
+
+#### 2. Additive (Multi-Axis) Mode — default
+Non-destructive stacking.
+
+- A **Transformation** constraint is created on the pose bone / object.
+- The constraint is named `SDK Location/Rotation/Scale [scope_key]` so each driver axis/layer gets its own independent constraint.
+- The constraint uses a hidden dummy Empty (`SDK_Constraint_Target`) as target (required by Blender’s constraint system; the Empty itself is never evaluated meaningfully).
+- Drivers are placed on the constraint’s `to_min_*` / `to_max_*` properties.
+- On keying, the add-on computes the *offset* from the captured rest pose and writes that offset into the constraint min/max curves.
+- Because each layer uses its own constraint and `mix_mode = ADD` (or `MULTIPLY` for scale), multiple drivers, axes, and configurations can push the same bone simultaneously without fighting.
+
+This is the mode used for corrective shapes and secondary motion that must stack on top of animator keys or other SDK layers.
+
+#### 3. Action Constraint Mode
+Pose-library style evaluation.
+
+- A dedicated Action data-block is created per driver scope (`SDK_Action_<scope_key>`).
+- An **Action** constraint is added to each driven bone/object.
+- Driver value is mapped to the constraint’s evaluation range (internally scaled by 100 so frames stay integer-friendly).
+- Keyframes are written into the Action at `frame = driver_value * 100`.
+- For non-transform custom drivers, a proxy driver is placed on the dummy Empty’s Location X; the Action constraint then reads that proxy.
+
+This keeps the rig clean (one Action per driver axis) and is good enough for multi-bone facial poses or corrective libraries.
+
+### Supporting Systems
+
+- **Path helpers** (`set_by_path`, `resolve_driver_target`, `full_path`, …) robustly handle array indices, ID properties, shape keys, and bone-relative paths.
+- **O(1) driver lookup** via `animation_data.drivers.find(path, index)` (with a linear fallback) keeps UI and evaluation fast on large rigs.
+- **Auto Rest Key** inserts a key at the driver’s rest value the first time a curve is keyed, guaranteeing a return to base.
+- **Live Preview** mutes/unmutes all SDK drivers and constraints so you can inspect the raw pose.
+- **Mirror operator** duplicates curves and constraints across `.L` ↔ `.R` pairs with proper axis flipping, working in all three modes.
+- **Dummy target garbage collection** removes the helper Empty when no constraints reference it (on curve deletion or add-on unregister).
+- **Keyed-value cache** avoids expensive scans on every UI redraw.
+
+All SDK-created drivers are identifiable by the variable name `sdk_driver`. Cleanup operators only touch those curves and the correspondingly named constraints/actions, restoring default transforms where possible.
 
 ---
 
 ## Features
 
-### Two modes
+### Configuration Manager & Dynamic Stacking
+- Save / load named configurations (driver, targets, channels, mode, layer tag).
+- Real-time search/filter in the UI list.
+- **Layer Tag** creates independent stacked constraints/actions so multiple setups compound cleanly.
 
-| Mode | Behaviour |
-|------|-----------|
-| **Additive** (default) | Non-destructive. Offsets stack on top of the base transform. You can still keyframe, pose, and animate the same channels. Objects use **delta transforms**; pose bones use **Transformation constraints** (`SDK Location` / `SDK Rotation` / `SDK Scale`) with driven min/max. |
-| **Direct** | Maya-style. The driver takes over the channel and sets its value directly. |
+### Driver & Driven Controls
+- Load active object or pose bone.
+- Full data-path support (relative, absolute, shape keys, custom properties).
+- Interactive scrubber + Prev/Next Key navigation.
+- Visual list of existing key values.
+- One-click channel presets (All / Loc / Rot / Scale / Clear).
+- One-click **Add Mesh Shape Keys**.
 
-### Driver
+### Rigging Helpers
+- Symmetry mirror (`.L` ↔ `.R`) across all modes.
+- Auto Rest Key and optional Reset-to-Base after keying.
+- Interpolation (Bezier / Linear / Constant) and extrapolation controls.
+- Delete key at current driver value or delete entire driven curves + constraints.
 
-- Load the **active object**, or the **active pose bone** in Pose Mode
-- Channels: Location XYZ, Rotation Euler XYZ, Quaternion WXYZ, Scale XYZ, or a **custom data path**
-- Custom paths support RNA attributes and ID properties, e.g. `["myprop"]`, `location[2]`, `modifiers["Bevel"].width`
-- **Rest value** — driver value at which driven channels are in their original state (auto-captured on load / channel change; editable)
-- **Capture Driver Rest** / **Driver to Rest** helpers
-
-### Driven targets
-
-- Load **selected objects**, or **selected pose bones** in Pose Mode
-- **Load Driven** replaces the list; **Add** appends without clearing
-- Per-channel toggles: Location, Rotation (Euler), Quaternion, Scale
-- **Custom** driven paths (semicolon-separated); custom paths are always Direct
-- Base pose is captured on load for Additive offset math
-
-### Keying
-
-- **Key** — store enabled driven channels against the **current driver value** (creates drivers/curves if needed)
-- **Auto Rest Key** (default on) — when a curve gets its first key, also key the rest state so channels return to base when the driver does
-- **Reset to Base after Key** (Additive) — after keying, put posed channels back to the captured base; the on-screen pose stays the same because the offset now provides it
-- **Interpolation:** Smooth (Bezier), Linear, Stepped (Constant)
-- **Extrapolation:** Constant or Linear outside the keyed range
-
-### Editing & cleanup
-
-- **Delete Key at Driver Value** — remove keys at the current driver value from enabled channels
-- **Delete Driven Curves** — remove SDK-managed drivers; reset additive outputs and unused SDK constraints
-- **Live Preview** — toggle SDK effect on/off so you can see and pose raw base channels
-- **Capture Base** / **Reset to Base** (Additive) — re-snapshot or restore the base pose
-
-### Safety
-
-- Does not overwrite drivers that were not created by this add-on
-- Refuses self-drive (same object/path or same bone driving itself)
-- Quaternion channels are Direct-only; Additive rotation on objects requires Euler mode
-- Axis-angle rotation is not supported
+### Performance
+- Optimized driver lookups.
+- Designed for rigs with thousands of bones/channels while maintaining high viewport FPS. (hopefully)
 
 ---
 
 ## Installation
 
-1. Download `set_driven_key.py` (or the repository ZIP).
-2. In Blender: **Edit → Preferences → Add-ons → Install from Disk** (or Install).
+1. Download `set_driven_key.py`.
+2. In Blender: **Edit → Preferences → Add-ons → Install…** (or Install from Disk).
 3. Select the file and enable **Set Driven Key**.
-4. Open the 3D Viewport sidebar (**N**) → **Driven Key**.
+4. Open the 3D Viewport sidebar (**N**) → tab **Driven Key**.
 
-**Requirements:** Blender **3.0** or newer.
-
----
-
-## Quick start
-
-### Basic workflow
-
-1. Select the controller object (or pose bone) → **Load Driver**.
-2. Choose the driver **Channel** (e.g. Location Y).
-3. Select the objects or bones to control → **Load Driven**.
-4. Enable the channels you want (e.g. Location X/Y/Z, Rotation Z).
-5. Optionally set **Mode** to Additive or Direct.
-6. Pose the driven items, then click **Key**.
-7. Change the driver value, pose again, **Key** again.
-8. Move the driver through its range — the driven channels follow the keyed relationship.
-
-### Additive tip
-
-Load driven targets at their rest pose so the captured base is correct. Pose offsets relative to that base, then **Key**. With **Reset to Base after Key** on, the base channels stay free for further animation while the SDK offset supplies the driven pose.
-
-### Live Preview
-
-- **On:** SDK drivers/constraints evaluate (WYSIWYG while scrubbing the driver).
-- **Off:** SDK is muted so you can inspect and edit raw transforms.
+**Requirements:** Blender 3.0 or newer (including 4.x).
 
 ---
 
-## UI reference
+## Quick Start
 
-### Main panel (`Driven Key`)
-
-- **Driver** — Load Driver, channel, value, Rest, Capture Rest, Driver to Rest  
-- **Driven** — Load / Add / Remove, list, channel toggles, custom paths  
-- **Mode** — Additive | Direct  
-- **Auto Rest Key**  
-- Additive-only: Capture Base, Reset to Base, Auto Reset after Key  
-- **Key** / **Delete Key** / **Delete Curves**  
-- **Live Preview**
-
-### Key Options (sub-panel)
-
-- Interpolation  
-- Extrapolation  
+1. Select the controller object or bone → **Load Driver**.
+2. Choose the driver channel (or enter a custom path).
+3. Select the driven objects/bones → **Load Driven** (or **Add Mesh Shape Keys**).
+4. Enable the channels you want to drive (use the presets).
+5. Choose mode: **Additive**, **Direct**, or **Action Constraint**.
+6. Pose the driven items and click **Key**.
+7. Scrub the driver (or use the Scrub slider), re-pose, and **Key** again.
+8. Optionally save the setup with **Save Current as Configuration**.
+9. Use **Prev Key** / **Next Key** or the scrubber to review the result in real time.
 
 ---
 
-## How it works (technical)
+## License / Credits
 
-- Driven relationships are stored as **object drivers** whose F-curve X axis is the driver property value and Y is the driven output.
-- SDK F-curves are identified by a driver variable named `sdk_driver` (type `SINGLE_PROP`, expression type `SUM`).
-- **Additive — objects:** drivers on `delta_location`, `delta_rotation_euler`, `delta_scale`.
-- **Additive — pose bones:** one Transformation constraint per transform kind; min and max outputs are both driven to the same value so the offset is constant and independent of the constraint source; mix modes ADD (loc/rot) and MULTIPLY (scale).
-- **Direct:** drivers on the actual `location` / `rotation_euler` / `rotation_quaternion` / `scale` (or custom) paths.
-- Keys closer than `0.01` on the driver axis are treated as the same key and updated in place.
+Authors: OceanMan, CloudKing, Apixelitonomo, U.F.Olive
 
----
-
-## Limitations
-
-- Additive mode does not support quaternion channels (use Direct or Euler).
-- Additive rotation on **objects** requires Euler rotation mode.
-- Axis-angle rotation is not supported.
-- Custom driven paths always use Direct mode.
-- A bone cannot drive itself; a path cannot drive itself.
-
----
-
-## File layout
-
-| File | Role |
-|------|------|
-| `set_driven_key.py` | Single-file add-on (registration, data, operators, UI) |
-| `README.md` | This documentation |
-
----
+Feel free to open issues or pull requests on the repository.
