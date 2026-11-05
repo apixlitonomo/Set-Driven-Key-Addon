@@ -1,9 +1,9 @@
 # Set Driven Key
 
-**Maya-style Set Driven Key for Blender** — drive object or bone channels from a controller, with **Additive**, **Direct**, and **Action Constraint** modes, designed for professional character rigging and high viewport performance at scale.
+**Maya-style Set Driven Key for Blender** — drive object or bone channels from any controller, with **Configurations Manager**, **Dynamic Multi-Axis Stacking**, **Additive**, **Direct**, and **Action Constraint** modes, designed for professional character rigging and high viewport performance at scale.
 
 **Addon name (in Blender):** Set Driven Key  
-**Version:** 1.2.0
+**Version:** 1.4.0
 **Minimum Blender:** 3.0.0  
 **Authors:** Oceanman, CloudKing  
 **Location:** 3D Viewport → Sidebar (**N**) → **Driven Key**  
@@ -17,30 +17,39 @@ In Maya, **Set Driven Key** links one attribute (the *driver*) to others (the *d
 
 This add-on provides an industry-standard interface to:
 
-1. Load a **driver** (object or pose bone + channel) with an interactive **Scrub Value** slider.
-2. Load **driven** targets (objects, bones, and mesh shape keys).
-3. Select channels with one-click **Channel Presets** (All, Loc, Rot, Scale, Clear).
-4. Choose between **Additive**, **Direct**, or **Action Constraint** modes.
-5. Author poses and press **Key**.
-6. Jump between authored keys with **Prev Key** / **Next Key** navigation.
-7. Mirror poses across symmetrical skeletons (`.L` <-> `.R`).
+1. **Manage & Search Configurations:** Save, browse, filter, and load different Set Driven Key setups directly in the UI panel.
+2. **Stack Multiple Configurations Dynamically:** Stack different driver axes, controllers, and corrective poses on top of each other without overwriting existing relationships.
+3. **Full Data Path Support:** Drive from standard channels, custom properties, or arbitrary data paths (e.g. `bpy.data.objects["Armature"].pose.bones["ClawControl"].scale[0]`).
+4. **Three Rigging Modes:** Choose between **Additive (Multi-Axis)**, **Direct**, or **Action Constraint** modes.
+5. **Interactive Controls:** Scrub driver values directly from the viewport panel and navigate between keys with **Prev Key** / **Next Key**.
+6. **Rigging Helpers:** One-click channel presets, Mesh Shape Key loading, and symmetrical pose mirroring (`.L` <-> `.R`).
 
 ---
 
 ## Features
 
+### Configuration Manager & Dynamic Stacking
+
+- **Save Configurations:** Save driver settings, driven targets, channel selections, and layer tags into named configurations.
+- **Search & Filter:** Search configurations in real-time within the UI list.
+- **Dynamic Layer Stacking:** Each configuration can have its own **Layer Tag**. When set, new relationships create independent stacked layers (using non-destructive Transformation constraints or scoped Action constraints) that compound their offsets cleanly without overwriting earlier configurations.
+
 ### Three Rigging Modes
 
 | Mode | Behaviour | Best Used For |
 |------|-----------|---------------|
-| **Additive** (default) | Non-destructive. Offsets stack on top of base animation. You can still keyframe, pose, and animate the same channels. Objects use delta transforms; bones use Transformation constraints. | Corrective shapes, secondary joint motion, and stacking offsets over animator keyframes. |
+| **Additive (Multi-Axis)** (default) | Non-destructive. Offsets stack on top of base animation. Allows multiple driver axes, bones, and layers to drive the same target channels simultaneously. | Corrective shapes, secondary joint motion, multi-axis corrective setups, and stacking offsets over animator keyframes. |
 | **Direct** | Maya-style direct control. The driver takes over the channel and sets its value directly. High-performance evaluation. | Mechanical rigs, foot rolls, finger curls, simple switches, and mesh Shape Keys. |
-| **Action Constraint** | Drives an Action Constraint evaluation range. Keyframes are stored into a unified Action data-block per driver, evaluating multi-bone / multi-channel poses natively. | Complex facial rigs, corrective pose libraries, multi-bone secondary setups, and maximum rig cleanliness. |
+| **Action Constraint** | Drives an Action Constraint evaluation range. Keyframes are stored into a unified Action data-block per driver axis, evaluating multi-bone / multi-channel poses natively. | Complex facial rigs, corrective pose libraries, multi-bone secondary setups, and maximum rig cleanliness. |
 
-### Driver Controls
+### Driver Controls & Full Data Paths
 
-- Load the **active object**, or the **active pose bone** in Pose Mode.
-- Channels: Location XYZ, Rotation Euler XYZ, Quaternion WXYZ, Scale XYZ, or a **custom data path**.
+- Load active object or active pose bone in Pose Mode.
+- Channels: Location XYZ, Rotation Euler XYZ, Quaternion WXYZ, Scale XYZ, or **Custom Path**.
+- Full data path syntax supported:
+  - `bpy.data.objects["Armature"].pose.bones["ClawControl"].scale[0]`
+  - `data.shape_keys.key_blocks["Smile"].value`
+  - Standard relative paths: `["myprop"]`, `location[2]`
 - **Interactive Scrubber:** Scrub the driver property directly from the panel without switching views.
 - **Key Navigation:** **Prev Key** and **Next Key** buttons jump the driver directly to authored key values.
 - **Visual Key Indicator:** Lists existing driver key values for the enabled channels.
@@ -85,12 +94,13 @@ This add-on provides an industry-standard interface to:
 ## Quick Start
 
 1. Select your controller object or bone → Click **Load Driver**.
-2. Select the driver channel (e.g., `Location Y` or a custom property).
+2. Select the driver channel (or enter a custom path, e.g. `bpy.data.objects["Armature"].pose.bones["ClawControl"].scale[0]`).
 3. Select the driven bones or objects → Click **Load Driven** (or **Add Mesh Shape Keys**).
 4. Choose the channels to drive using the presets (`Loc`, `Rot`, `Scale`, or `All`).
 5. Choose your mode (**Additive**, **Direct**, or **Action Constraint**).
 6. Pose the driven items and click **Key**.
 7. Scrub the driver value (or use the **Scrub Value** slider), adjust the pose, and click **Key** again.
-8. Use **Prev Key** and **Next Key** to review your keyed poses, or scrub the driver to see the animation evaluate in real-time.
+8. Save your setup with **Save Current as Configuration** (+) to edit or stack more configurations on top later.
+9. Use **Prev Key** and **Next Key** to review your keyed poses, or scrub the driver to see the animation evaluate in real-time.
 
 ---
