@@ -36,7 +36,7 @@ This add-on gives you a focused, Maya-like interface that:
 Ideal for character rigging: corrective shapes, secondary motion, foot rolls, finger curls, facial systems, and multi-axis driven setups—while tring to stay performant even on large rigs.
 
 ---
-**Known issues**
+# Known issues
 
 **Action Constraint Mode – Blender 5.0+ Compatibility**
 
