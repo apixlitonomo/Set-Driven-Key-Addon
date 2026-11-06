@@ -1767,9 +1767,10 @@ class SDK_OT_config_export(Operator, ExportHelper):
 
     def execute(self, context):
         s = context.scene.sdk_settings
+        ver = list(bl_info.get("version", (3, 5, 0))) if "bl_info" in globals() else [3, 5, 0]
         payload = {
             "addon": "Set Driven Key",
-            "version": list(bl_info["version"]),
+            "version": ver,
             "configs": [_config_to_dict(c) for c in s.configs],
         }
         try:

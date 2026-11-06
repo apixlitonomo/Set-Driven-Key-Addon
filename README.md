@@ -133,9 +133,16 @@ All SDK-created drivers are identifiable by the variable name `sdk_driver`. Clea
 
 ## Installation
 
+### As an Extension (Blender 4.2+)
+1. Package the extension into a `.zip` archive containing `blender_manifest.toml`, `__init__.py`, and `set_driven_key.py` (or build using `blender --command extension build`).
+2. In Blender: **Edit → Preferences → Get Extensions → Install from Disk…** (or repository).
+3. Select the `.zip` archive and enable **Set Driven Key**.
+4. Open the 3D Viewport sidebar (**N**) → tab **Driven Key**.
+
+### As a Legacy Add-on (Blender 3.0+)
 1. Download `set_driven_key.py`.
-2. In Blender: **Edit → Preferences → Add-ons → Install…** (or Install from Disk).
-3. Select the file and enable **Set Driven Key**.
+2. In Blender: **Edit → Preferences → Add-ons → Install…** (or Install from Disk / Install Legacy Add-on).
+3. Select `set_driven_key.py` and enable **Set Driven Key**.
 4. Open the 3D Viewport sidebar (**N**) → tab **Driven Key**.
 
 **Requirements:** Blender 3.0 or newer (including 4.x).
