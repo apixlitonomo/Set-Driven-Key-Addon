@@ -5,7 +5,7 @@ bl_info = {
     "blender": (3, 0, 0),
     "location": "3D Viewport > Sidebar (N) > Driven Key",
     "description": "Professional Set Driven Key for Blender with Configuration Manager, Multi-Axis Stacking, Additive, Direct, and Action Constraint modes",
-    "category": "Animation",
+    "category": "Rigging, Animation",
 }
 
 import json
