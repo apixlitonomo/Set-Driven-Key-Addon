@@ -36,6 +36,32 @@ This add-on gives you a focused, Maya-like interface that:
 Ideal for character rigging: corrective shapes, secondary motion, foot rolls, finger curls, facial systems, and multi-axis driven setups—while tring to stay performant even on large rigs.
 
 ---
+**Known issues**
+
+**Action Constraint Mode – Blender 5.0+ Compatibility**
+
+  **Action Constraint mode currently does not work in Blender 5.0 and newer.**
+#### Reason
+Blender 5.0 removed the legacy Action API (`action.fcurves`, `action.groups`, `action.id_root`).
+
+Actions now use the new **Slotted Actions** system (Slots → Layers → Strips → Channelbags).
+
+The current implementation still relies on the old `action.fcurves` access when creating and keying the `SDK_Action_*` data-blocks used by Action Constraints. This raises:
+
+  AttributeError: 'Action' object has no attribute 'fcurves'
+
+#### Status
+- **Direct mode** → works
+- **Additive mode** → works
+- **Action Constraint mode** → broken on Blender 5.0+
+
+#### Workaround
+Use **Direct** or **Additive** mode instead.  
+They produce the same (or better) results for most Set Driven Key use cases and avoid the Action system entirely.
+
+A future update will adapt the Action Constraint mode to the new slotted Action API.
+
+---
 
 ## How It Works Internally
 
