@@ -14,7 +14,7 @@ A Blender add-on that brings Maya’s *Set Driven Key* workflow into Blender. Dr
 
 **Location:** 3D Viewport → Sidebar (**N**) → **Driven Key**  
 
-**Category:** Animation  
+**Category:** Rigging, Animation
 
 ---
 
