@@ -1,54 +1,7 @@
-# ==========================================================================
-# Set Driven Key 1.5.1 - change notes
-#
-#  1.5.1
-#  * Action Constraint mode: curves hold OFFSETS from the captured base (identity at
-#    rest: 0 / 1 / quaternion 1,0,0,0) instead of absolute values, so they stack on
-#    top of the animation exactly like Additive layers. Curves are grouped per bone.
-#    Rotation follows the bone's rotation mode (Euler or quaternion).
-#  * Action and Additive (Transformation) layers can now coexist on the same channel.
-#    Only Direct mode still conflicts with the other two.
-#  * "Refresh Action Range" re-syncs constraint ranges after editing keys by hand;
-#    ranges are also refreshed on mirrored bones that are not in the driven list.
-#  * Scrub slider: normalised 0-1 slider over an adjustable Min/Max range
-#    (auto-set from the driver channel and current value), plus a plain value field.
-#
-#  1.5.0 (vs 1.4.0)
-#
-#  * set_by_path(): token-based resolver; array elements (location[0]),
-#    ID props (["p"], pose.bones["B"]["p"]) and shape-key paths all work.
-#    Scrub / Prev-Next Key / Driver to Rest use the same read/write helpers.
-#  * find_driver_fcurve(): scalar drivers live at array_index 0 in Blender
-#    (drivers.find(path, index=-1) never matches), so -1 is translated to 0
-#    but an *array* property without index no longer matches element 0.
-#  * Mirror: Direct, Additive (scoped Transformation constraints) and Action
-#    Constraint modes; signs come from the bones' rest matrices (falls back
-#    to Blender's X-mirror convention); .L/.R, _L/_R, .left/.right, prefixes.
-#  * Load Mesh Shape Keys also adds the mesh to the driven list.
-#  * Action mode works on Blender 5.0+ (slots -> layers -> strips -> channelbags);
-#    the legacy Action.fcurves path is kept for 3.0 - 4.5.
-#  * Action mode with non-transform drivers (custom props, quaternion, other
-#    IDs) uses the constraint's Evaluation Time, driven by an SDK f-curve.
-#    Mapping (all Action modes): driver value v -> action frame v * 100.
-#  * add_rest_key() never skipped on empty / single-pending-key curves;
-#    custom channels remember their rest value (SDK_DrivenItem.rest_custom).
-#  * SDK_Constraint_Target is parked in a hidden collection and removed when
-#    unused (Delete Curves, unregister).
-#  * Live Preview mutes/unmutes drivers (incl. shape-key IDs) and SDK
-#    constraints (Additive + Action) through one shared function.
-#  * Configurations store pointers + name/data/library fallbacks; JSON
-#    Export / Import; clear warnings for missing items.
-#  * Mode-conflict detection when keying (Direct vs Additive vs Action,
-#    foreign drivers, driver re-binding).
-#  * Keyed-value list in the panel is cached (invalidated by operators,
-#    undo/redo, file load); narrower exception handling; UNDO on all
-#    data-changing operators.
-# ==========================================================================
-
 bl_info = {
     "name": "Set Driven Key",
-    "author": "OceanMan, CloudKing, Apixelitonomo, U.F.Olive",
-    "version": (1, 5, 1),
+    "author": "OceanMan, CloudKing",
+    "version": (1, 5, 2),
     "blender": (3, 0, 0),
     "location": "3D Viewport > Sidebar (N) > Driven Key",
     "description": "Professional Set Driven Key for Blender with Configuration Manager, Multi-Axis Stacking, Additive, Direct, and Action Constraint modes",
@@ -677,12 +630,31 @@ def _fit_scope(scope_key, overhead):
 _SDK_TRANSFORM_PREFIXES = tuple(v + " [" for v in SDK_CON_BASE.values())
 
 
+_SDK_NAME_TAIL_RE = re.compile(r"\](\.\d+)?$")  # "...]" or Blender's renamed "...].001"
+
+
 def is_sdk_transform_constraint(con):
-    return con.type == "TRANSFORM" and con.name.startswith(_SDK_TRANSFORM_PREFIXES) and con.name.endswith("]")
+    return (con.type == "TRANSFORM" and con.name.startswith(_SDK_TRANSFORM_PREFIXES)
+            and _SDK_NAME_TAIL_RE.search(con.name) is not None)
 
 
 def is_sdk_action_constraint(con):
-    return con.type == "ACTION" and con.name.startswith(SDK_ACTION_CON_PREFIX) and con.name.endswith("]")
+    return (con.type == "ACTION" and con.name.startswith(SDK_ACTION_CON_PREFIX)
+            and _SDK_NAME_TAIL_RE.search(con.name) is not None)
+
+
+def find_sdk_constraint(owner, name, type_):
+    """The constraint called `name`, or Blender's auto-renamed twin (`name.001`, `name.002`...).
+
+    Blender checks a renamed constraint's name for uniqueness against the active bone's
+    constraints, so a constraint created by this add-on can come back with a suffix.
+    """
+    con = owner.constraints.get(name)
+    if con is not None:
+        return con
+    twins = [c for c in owner.constraints
+             if c.type == type_ and c.name.startswith(name + ".") and c.name[len(name) + 1:].isdigit()]
+    return min(twins, key=lambda c: c.name) if twins else None
 
 
 def is_sdk_constraint(con):
@@ -787,9 +759,20 @@ def constraint_name_for(kind, scope_key):
     return "%s [%s]" % (base, _fit_scope(scope_key, len(base) + 3))
 
 
+def actual_constraint_name(item, kind, scope_key):
+    """Name the layer's constraint really has on the item's owner (canonical name if none yet)."""
+    name = constraint_name_for(kind, scope_key)
+    owner = owner_of(item)
+    if owner is not None:
+        con = find_sdk_constraint(owner, name, "TRANSFORM")
+        if con is not None:
+            return con.name
+    return name
+
+
 def additive_targets(item, kind, axis, scope_key):
     """(path, index) pairs the SDK drives for one transform channel in additive mode."""
-    con_name = constraint_name_for(kind, scope_key)
+    con_name = actual_constraint_name(item, kind, scope_key)
     a = "xyz"[axis]
     rel = con_data_path(con_name) + "."
     return [
@@ -802,10 +785,13 @@ def ensure_constraint(item, kind, scope_key, mute):
     """Ensure a Transformation constraint exists on the pose bone or object."""
     owner = owner_of(item)
     con_name = constraint_name_for(kind, scope_key)
-    con = owner.constraints.get(con_name)
+    con = find_sdk_constraint(owner, con_name, "TRANSFORM")
     if con is None:
         con = owner.constraints.new("TRANSFORM")
         con.name = con_name
+        if con.name != con_name:
+            _warn("Blender renamed constraint '%s' to '%s' (name already used in the pose); using that name"
+                  % (con_name, con.name))
         con.owner_space = "LOCAL"
         con.target_space = "LOCAL"
         con.map_from = "LOCATION"
@@ -892,7 +878,7 @@ def mode_conflict(item, mode, attr, axis, scope_key=""):
         for con in owner.constraints:
             if not is_sdk_transform_constraint(con) or not con.name.startswith(prefix):
                 continue
-            for p, i in additive_targets(item, kind, axis, con.name[len(prefix):-1]):
+            for p, i in additive_targets(item, kind, axis, con.name[len(prefix):con.name.rfind("]")]):
                 fc = find_driver_fcurve(obj, p, i)
                 if fc is not None and is_sdk_fcurve(fc) and len(fc.keyframe_points):
                     return "%s already has the Additive SDK layer '%s' (use Delete Curves first)" % (label, con.name)
@@ -957,6 +943,7 @@ def key_additive(s, item, kind, axis, drv_obj, d_path, d_idx, d_var_path, scope_
     except _RNA_ERRORS as e:
         return "Can't set up constraint on '%s': %s" % (item.bone or obj.name, e)
 
+    targets = additive_targets(item, kind, axis, scope_key)  # real constraint name (see find_sdk_constraint)
     for path, p_idx in targets:
         fc, msg = ensure_driver(obj, path, p_idx, drv_obj, d_var_path, not s.live_preview)
         if fc is None:
@@ -1105,11 +1092,14 @@ def ensure_action_constraint(s, item, action, scope_key, drv_obj, drv_bone):
         return None, "Target owner not found"
     channel = action_transform_channel(s)
     con_name = action_constraint_name_for(scope_key)
-    con = owner.constraints.get(con_name)
+    con = find_sdk_constraint(owner, con_name, "ACTION")
     created = con is None
     if created:
         con = owner.constraints.new("ACTION")
         con.name = con_name
+        if con.name != con_name:
+            _warn("Blender renamed constraint '%s' to '%s' (name already used in the pose); using that name"
+                  % (con_name, con.name))
         con.target_space = "LOCAL"
         if hasattr(con, "mix_mode"):
             try:
@@ -1206,13 +1196,13 @@ def update_action_constraint_ranges(action, s, scope_key, extra_items=()):
         seen.add(obj.as_pointer())
         owners = [("", obj)] + [(pb.name, pb) for pb in (obj.pose.bones if obj.pose else ())]
         for bone, owner in owners:
-            con = owner.constraints.get(con_name)
+            con = find_sdk_constraint(owner, con_name, "ACTION")
             if con is None or con.action != action:
                 continue
             con.frame_start = f_min
             con.frame_end = f_max
             if getattr(con, "use_eval_time", False):
-                set_eval_time_curve(SimpleNamespace(obj=obj, bone=bone), con_name, drv_id, d_var_path,
+                set_eval_time_curve(SimpleNamespace(obj=obj, bone=bone), con.name, drv_id, d_var_path,
                                     v_min, v_max, not s.live_preview)
             else:
                 con.min = v_min
@@ -2664,15 +2654,17 @@ class SDK_OT_delete_curves(Operator):
         s = context.scene.sdk_settings
         drv_id, drv_bone, rel_attr, idx, d_var_path, scope_key = resolve_driver_target(s)
         removed = 0
+        orphans = 0
 
         if s.mode == "ACTION":
             act = bpy.data.actions.get(action_name_for(scope_key))
             con_name = action_constraint_name_for(scope_key)
             for item in s.driven_items:
                 owner = owner_of(item)
-                if owner and con_name in owner.constraints:
-                    remove_eval_time_driver(item, con_name)
-                    owner.constraints.remove(owner.constraints[con_name])
+                con = find_sdk_constraint(owner, con_name, "ACTION") if owner else None
+                if con is not None:
+                    remove_eval_time_driver(item, con.name)
+                    owner.constraints.remove(con)
                     removed += 1
             if act and act.users <= 1:
                 bpy.data.actions.remove(act)
@@ -2697,6 +2689,22 @@ class SDK_OT_delete_curves(Operator):
                         except _RNA_ERRORS:
                             pass
 
+                # Sweep SDK drivers whose constraint no longer exists (left behind by older versions
+                # that duplicated / renamed constraints); they can never evaluate anyway.
+                ad = obj.animation_data
+                if ad:
+                    for fc in list(ad.drivers):
+                        if not is_sdk_fcurve(fc) or ".constraints[" not in fc.data_path:
+                            continue
+                        try:
+                            obj.path_resolve(fc.data_path)
+                        except _RNA_ERRORS:
+                            try:
+                                obj.driver_remove(fc.data_path, fc.array_index)
+                            except _RNA_ERRORS:
+                                continue
+                            orphans += 1
+
                 # Drop Transformation layers that no longer have any driver. Action constraints
                 # (no drivers in transform mode) and user constraints are never touched here.
                 owner = owner_of(item)
@@ -2711,7 +2719,10 @@ class SDK_OT_delete_curves(Operator):
         cleanup_dummy_target()
         invalidate_key_cache()
         context.view_layer.update()
-        self.report({"INFO"}, "Removed %d driven relationship(s)" % removed)
+        msg = "Removed %d driven relationship(s)" % removed
+        if orphans:
+            msg += " and %d orphaned driver(s)" % orphans
+        self.report({"INFO"}, msg)
         return {"FINISHED"}
 
 
