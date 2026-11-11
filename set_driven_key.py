@@ -1,11 +1,58 @@
+# ==========================================================================
+# Set Driven Key 1.5.1 - change notes
+#
+#  1.5.1
+#  * Action Constraint mode: curves hold OFFSETS from the captured base (identity at
+#    rest: 0 / 1 / quaternion 1,0,0,0) instead of absolute values, so they stack on
+#    top of the animation exactly like Additive layers. Curves are grouped per bone.
+#    Rotation follows the bone's rotation mode (Euler or quaternion).
+#  * Action and Additive (Transformation) layers can now coexist on the same channel.
+#    Only Direct mode still conflicts with the other two.
+#  * "Refresh Action Range" re-syncs constraint ranges after editing keys by hand;
+#    ranges are also refreshed on mirrored bones that are not in the driven list.
+#  * Scrub slider: normalised 0-1 slider over an adjustable Min/Max range
+#    (auto-set from the driver channel and current value), plus a plain value field.
+#
+#  1.5.0 (vs 1.4.0)
+#
+#  * set_by_path(): token-based resolver; array elements (location[0]),
+#    ID props (["p"], pose.bones["B"]["p"]) and shape-key paths all work.
+#    Scrub / Prev-Next Key / Driver to Rest use the same read/write helpers.
+#  * find_driver_fcurve(): scalar drivers live at array_index 0 in Blender
+#    (drivers.find(path, index=-1) never matches), so -1 is translated to 0
+#    but an *array* property without index no longer matches element 0.
+#  * Mirror: Direct, Additive (scoped Transformation constraints) and Action
+#    Constraint modes; signs come from the bones' rest matrices (falls back
+#    to Blender's X-mirror convention); .L/.R, _L/_R, .left/.right, prefixes.
+#  * Load Mesh Shape Keys also adds the mesh to the driven list.
+#  * Action mode works on Blender 5.0+ (slots -> layers -> strips -> channelbags);
+#    the legacy Action.fcurves path is kept for 3.0 - 4.5.
+#  * Action mode with non-transform drivers (custom props, quaternion, other
+#    IDs) uses the constraint's Evaluation Time, driven by an SDK f-curve.
+#    Mapping (all Action modes): driver value v -> action frame v * 100.
+#  * add_rest_key() never skipped on empty / single-pending-key curves;
+#    custom channels remember their rest value (SDK_DrivenItem.rest_custom).
+#  * SDK_Constraint_Target is parked in a hidden collection and removed when
+#    unused (Delete Curves, unregister).
+#  * Live Preview mutes/unmutes drivers (incl. shape-key IDs) and SDK
+#    constraints (Additive + Action) through one shared function.
+#  * Configurations store pointers + name/data/library fallbacks; JSON
+#    Export / Import; clear warnings for missing items.
+#  * Mode-conflict detection when keying (Direct vs Additive vs Action,
+#    foreign drivers, driver re-binding).
+#  * Keyed-value list in the panel is cached (invalidated by operators,
+#    undo/redo, file load); narrower exception handling; UNDO on all
+#    data-changing operators.
+# ==========================================================================
+
 bl_info = {
     "name": "Set Driven Key",
     "author": "OceanMan, CloudKing, Apixelitonomo, U.F.Olive",
-    "version": (3, 5, 0),
+    "version": (1, 5, 1),
     "blender": (3, 0, 0),
     "location": "3D Viewport > Sidebar (N) > Driven Key",
     "description": "Professional Set Driven Key for Blender with Configuration Manager, Multi-Axis Stacking, Additive, Direct, and Action Constraint modes",
-    "category": "Rigging, Animation",
+    "category": "Animation",
 }
 
 import json
@@ -335,6 +382,25 @@ def capture_driver_rest(s):
         s.driver_rest = read_driver_value(s)
     except _READ_ERRORS:
         pass
+
+
+def auto_scrub_range(s):
+    """Pick a usable Min/Max for the scrub slider from the driver channel and its current value."""
+    _id, _bone, rel_attr, _idx, _path, _key = resolve_driver_target(s)
+    lo, hi = -1.0, 1.0
+    if rel_attr == "rotation_euler":
+        lo, hi = -math.pi, math.pi
+    elif rel_attr == "scale":
+        lo, hi = 0.0, 2.0
+    elif rel_attr == "location":
+        lo, hi = -2.0, 2.0
+    try:
+        v = read_driver_value(s)
+        lo, hi = min(lo, v), max(hi, v)
+    except _READ_ERRORS:
+        pass
+    s.scrub_min = lo
+    s.scrub_max = hi
 
 
 # --------------------------------------------------------------------------
@@ -802,10 +868,11 @@ def reset_base(item, specs):
 # --------------------------------------------------------------------------
 
 def mode_conflict(item, mode, attr, axis, scope_key=""):
-    """Return '' or a message if the channel is already controlled by an SDK setup of another mode.
+    """Return '' or a message if the channel is already controlled by an SDK setup that can't coexist.
 
-    Same-mode stacking is by design: Additive layers and Action constraints of other
-    scopes stack, so they are not conflicts for their own mode.
+    Additive layers and Action constraints are both offset-based and stack with each
+    other (and with other scopes of their own kind). Only Direct mode, which takes the
+    channel over, conflicts with them (and they with it).
     """
     obj = item.obj
     owner = owner_of(item)
@@ -819,7 +886,7 @@ def mode_conflict(item, mode, attr, axis, scope_key=""):
         if fc is not None and is_sdk_fcurve(fc):
             return "%s is already driven in Direct mode (use Delete Curves first)" % label
 
-    if mode != "ADDITIVE" and attr in _ATTR_KIND:
+    if mode == "DIRECT" and attr in _ATTR_KIND:
         kind = _ATTR_KIND[attr]
         prefix = SDK_CON_BASE[kind] + " ["
         for con in owner.constraints:
@@ -830,15 +897,15 @@ def mode_conflict(item, mode, attr, axis, scope_key=""):
                 if fc is not None and is_sdk_fcurve(fc) and len(fc.keyframe_points):
                     return "%s already has the Additive SDK layer '%s' (use Delete Curves first)" % (label, con.name)
 
-    if mode != "ACTION":
+    if mode == "DIRECT":
         for con in owner.constraints:
             if not is_sdk_action_constraint(con) or con.action is None:
                 continue
             try:
-                fcs = action_fcurves(con.action)
+                found = action_find_fcurve(con.action, path, axis)
             except RuntimeError:
                 break
-            if fcs.find(path, index=axis) is not None:
+            if found is not None:
                 return "%s already has the Action SDK constraint '%s' (use Delete Curves first)" % (label, con.name)
     return ""
 
@@ -936,12 +1003,61 @@ def key_direct(s, item, attr, idx, drv_obj, d_path, d_idx, d_var_path, x):
 #       (linear, constant extrapolation), giving the same frame = v * 100.
 # --------------------------------------------------------------------------
 
-def action_fcurves(action):
-    """F-Curve collection of an Action (legacy API, Blender 3.0 - 4.5)."""
+def _is_layered_only(action):
+    """True on Blender 5.0+, where the legacy Action.fcurves API is gone."""
+    return getattr(action, "fcurves", None) is None and hasattr(action, "slots")
+
+
+def _action_slot(action, create=False):
+    """First slot of a slotted Action (Blender 4.4+), optionally creating it."""
+    slots = getattr(action, "slots", None)
+    if slots is None:
+        return None
+    if len(slots):
+        return slots[0]
+    if create:
+        return slots.new(id_type="OBJECT", name="SDK")
+    return None
+
+
+def _action_channelbag(action, create=False):
+    """Channelbag of the first slot in layer 0 / strip 0 (Blender 5.0+ layered Actions)."""
+    slot = _action_slot(action, create)
+    if slot is None:
+        return None
+    if not len(action.layers):
+        if not create:
+            return None
+        action.layers.new(name="SDK")
+    layer = action.layers[0]
+    if not len(layer.strips):
+        if not create:
+            return None
+        layer.strips.new(type="KEYFRAME")
+    return layer.strips[0].channelbag(slot, ensure=create)
+
+
+def action_fcurves(action, create=False):
+    """F-Curve collection of an Action.
+
+    Blender 3.0 - 4.5: legacy Action.fcurves. Blender 5.0+: the channelbag of the
+    first slot (slots -> layers -> strips -> channelbags). With create=False and
+    nothing there yet an empty tuple is returned (iterate only; use create=True
+    before .find / .new).
+    """
     fcs = getattr(action, "fcurves", None)
-    if fcs is None:
-        raise RuntimeError("This Blender version no longer exposes Action.fcurves; Action mode is unavailable")
-    return fcs
+    if fcs is not None:
+        return fcs
+    if not hasattr(action, "slots"):
+        raise RuntimeError("Unsupported Blender version: Action exposes neither fcurves nor slots")
+    bag = _action_channelbag(action, create)
+    return bag.fcurves if bag is not None else ()
+
+
+def action_find_fcurve(action, path, index):
+    """Find an f-curve in the Action's channels (None if absent)."""
+    fcs = action_fcurves(action)
+    return fcs.find(path, index=index) if hasattr(fcs, "find") else None
 
 
 def action_transform_channel(s):
@@ -977,6 +1093,8 @@ def get_action_for_driver(s, scope_key):
             except (TypeError, AttributeError, ValueError):
                 pass
         act.use_fake_user = True
+    if _is_layered_only(act):
+        action_fcurves(act, create=True)  # slot + layer + strip + channelbag (Blender 5.0+)
     return act
 
 
@@ -1008,6 +1126,13 @@ def ensure_action_constraint(s, item, action, scope_key, drv_obj, drv_bone):
                       "use a Location / Rotation / Scale driver channel")
 
     con.action = action
+    if hasattr(con, "action_slot"):  # Blender 4.4+: bind the constraint to the Action's slot
+        slot = _action_slot(action, create=_is_layered_only(action))
+        if slot is not None and con.action_slot != slot:
+            try:
+                con.action_slot = slot
+            except _RNA_ERRORS:
+                pass
     if channel is not None:
         if hasattr(con, "use_eval_time"):
             con.use_eval_time = False
@@ -1074,21 +1199,83 @@ def update_action_constraint_ranges(action, s, scope_key, extra_items=()):
     drv_id, _b, _a, _i, d_var_path, _k = resolve_driver_target(s)
     con_name = action_constraint_name_for(scope_key)
     seen = set()
-    for item in list(s.driven_items) + list(extra_items):
-        owner = owner_of(item)
-        if owner is None or owner.as_pointer() in seen:
+    for src in list(s.driven_items) + list(extra_items):
+        obj = src.obj
+        if obj is None or obj.as_pointer() in seen:
             continue
-        seen.add(owner.as_pointer())
-        con = owner.constraints.get(con_name)
-        if con is None or con.action != action:
-            continue
-        con.frame_start = f_min
-        con.frame_end = f_max
-        if getattr(con, "use_eval_time", False):
-            set_eval_time_curve(item, con_name, drv_id, d_var_path, v_min, v_max, not s.live_preview)
-        else:
-            con.min = v_min
-            con.max = v_max
+        seen.add(obj.as_pointer())
+        owners = [("", obj)] + [(pb.name, pb) for pb in (obj.pose.bones if obj.pose else ())]
+        for bone, owner in owners:
+            con = owner.constraints.get(con_name)
+            if con is None or con.action != action:
+                continue
+            con.frame_start = f_min
+            con.frame_end = f_max
+            if getattr(con, "use_eval_time", False):
+                set_eval_time_curve(SimpleNamespace(obj=obj, bone=bone), con_name, drv_id, d_var_path,
+                                    v_min, v_max, not s.live_preview)
+            else:
+                con.min = v_min
+                con.max = v_max
+
+
+_QUAT_IDENT = (1.0, 0.0, 0.0, 0.0)
+
+
+def action_channel_value(item, owner, attr, idx):
+    """(offset, identity) of one channel relative to the captured base.
+
+    Action curves hold offsets so the constraint stacks on the animation like an
+    Additive layer: location / Euler = difference, scale = ratio, quaternion =
+    delta (q * rest^-1). Raises ValueError for unsupported cases.
+    """
+    if attr == "location":
+        return owner.location[idx] - item.rest_loc[idx], 0.0
+    if attr == "rotation_euler":
+        if owner.rotation_mode == "AXIS_ANGLE":
+            raise ValueError("Axis-angle rotation isn't supported")
+        off = current_euler(owner)[idx] - rest_euler(item, owner)[idx]
+        if owner.rotation_mode == "QUATERNION":
+            off = (off + math.pi) % (2.0 * math.pi) - math.pi
+        return off, 0.0
+    if attr == "scale":
+        rest = item.rest_scale[idx]
+        if abs(rest) < 1e-8:
+            raise ValueError("Base scale is zero on %s, can't compute a ratio" % (item.bone or item.obj.name))
+        return owner.scale[idx] / rest, 1.0
+    if attr == "rotation_quaternion":
+        delta = owner.rotation_quaternion @ Quaternion(item.rest_quat).inverted()
+        return delta[idx], _QUAT_IDENT[idx]
+    raise ValueError("Unsupported channel '%s'" % attr)
+
+
+def action_rotation_skip(item, wants_euler, other_enabled):
+    """None = key it; '' = skip silently; text = skip with a message.
+
+    The Action constraint only reads Euler curves on Euler bones and quaternion
+    curves on quaternion bones.
+    """
+    owner = owner_of(item)
+    quat_bone = owner.rotation_mode == "QUATERNION"
+    if wants_euler == (not quat_bone):
+        return None
+    if other_enabled:
+        return ""
+    name = item.bone or item.obj.name
+    if quat_bone:
+        return "'%s' uses quaternion rotation: enable the Quat channels (Euler curves don't affect it)" % name
+    return "'%s' uses Euler rotation: enable the Rotation channels (quaternion curves don't affect it)" % name
+
+
+def new_action_fcurve(action, fcs, path, index, group=""):
+    """Create an f-curve, grouped by bone name so the Dope Sheet's bone filters work."""
+    key = "group_name" if _is_layered_only(action) else "action_group"
+    if group:
+        try:
+            return fcs.new(path, index=index, **{key: group})
+        except TypeError:
+            pass
+    return fcs.new(path, index=index)
 
 
 def key_action_mode(s, item, attr, idx, action, scope_key, drv_obj, drv_bone, x):
@@ -1101,20 +1288,20 @@ def key_action_mode(s, item, attr, idx, action, scope_key, drv_obj, drv_bone, x)
         return conflict
     path = full_path(item.bone, attr)
     try:
-        y = get_value(obj, path, idx)
-    except _RNA_ERRORS:
-        return "Can't read '%s'" % var_path(path, idx)
+        y, ident = action_channel_value(item, owner_of(item), attr, idx)
+    except _RNA_ERRORS as e:
+        return "Can't read '%s': %s" % (var_path(path, idx), e)
 
     con, msg = ensure_action_constraint(s, item, action, scope_key, drv_obj, drv_bone)
     if con is None:
         return msg
 
-    fcs = action_fcurves(action)
+    fcs = action_fcurves(action, create=True)
     fc = fcs.find(path, index=max(idx, 0))
     if fc is None:
-        fc = fcs.new(path, index=max(idx, 0))
+        fc = new_action_fcurve(action, fcs, path, max(idx, 0), item.bone or "Object Transforms")
 
-    add_rest_key(s, fc, x, rest_value_for(item, attr, idx), ACTION_FRAMES_PER_UNIT)
+    add_rest_key(s, fc, x, ident, ACTION_FRAMES_PER_UNIT)
     key_curve(fc, x * ACTION_FRAMES_PER_UNIT, y, s.interpolation, s.extrapolation)
     return ""
 
@@ -1327,7 +1514,7 @@ def mirror_additive(s, item, dst, signs, drv_id, d_var_path, scope_key, problems
 
 
 def mirror_action(s, item, dst, signs, drv_id, drv_bone, d_var_path, scope_key, action, problems):
-    fcs = action_fcurves(action)
+    fcs = action_fcurves(action, create=True)
     enabled = enabled_channels(s)
     prefix = full_path(item.bone, "")
     curves = 0
@@ -1345,7 +1532,7 @@ def mirror_action(s, item, dst, signs, drv_id, drv_bone, d_var_path, scope_key, 
         dst_path = full_path(dst.bone, attr)
         dst_fc = fcs.find(dst_path, index=ax)
         if dst_fc is None:
-            dst_fc = fcs.new(dst_path, index=ax)
+            dst_fc = new_action_fcurve(action, fcs, dst_path, ax, dst.bone)
         copy_curve_flipped(fc, dst_fc, signs[attr][ax])
         curves += 1
     cons = 0
@@ -1450,6 +1637,7 @@ def _preview_update(self, context):
 
 def _driver_changed(self, context):
     capture_driver_rest(self)
+    auto_scrub_range(self)
 
 
 def _driver_current_get(self):
@@ -1466,6 +1654,22 @@ def _driver_current_set(self, value):
             bpy.context.view_layer.update()
     except _READ_ERRORS:
         pass
+
+
+def _scrub_t_get(self):
+    lo, hi = self.scrub_min, self.scrub_max
+    if hi - lo < 1e-9:
+        return 0.0
+    try:
+        v = read_driver_value(self)
+    except _READ_ERRORS:
+        return 0.0
+    return min(1.0, max(0.0, (v - lo) / (hi - lo)))
+
+
+def _scrub_t_set(self, t):
+    lo, hi = self.scrub_min, self.scrub_max
+    _driver_current_set(self, lo + t * (hi - lo))
 
 
 class SDK_DrivenItem(PropertyGroup):
@@ -1513,6 +1717,15 @@ class SDK_Settings(PropertyGroup):
         get=_driver_current_get,
         set=_driver_current_set,
     )
+    driver_scrub_t: FloatProperty(
+        name="Scrub",
+        description="Scrub the driver between Min and Max",
+        subtype="FACTOR", min=0.0, max=1.0,
+        get=_scrub_t_get,
+        set=_scrub_t_set,
+    )
+    scrub_min: FloatProperty(name="Min", description="Driver value at the left end of the scrub slider", default=-1.0)
+    scrub_max: FloatProperty(name="Max", description="Driver value at the right end of the scrub slider", default=1.0)
     auto_rest_key: BoolProperty(
         name="Auto Rest Key",
         description="When a driven curve gets its first key, also key the rest state at the "
@@ -1896,6 +2109,7 @@ class SDK_OT_load_driver(Operator):
         s.driver_obj = obj
         s.driver_bone = bone
         capture_driver_rest(s)
+        auto_scrub_range(s)
         invalidate_key_cache()
         return {"FINISHED"}
 
@@ -2146,6 +2360,47 @@ class SDK_OT_reset_base(Operator):
         return {"FINISHED"}
 
 
+class SDK_OT_scrub_range_auto(Operator):
+    bl_idname = "sdk.scrub_range_auto"
+    bl_label = "Auto Scrub Range"
+    bl_description = "Set the scrub slider's Min / Max from the driver channel and its current value"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        s = context.scene.sdk_settings
+        if resolve_driver_target(s)[0] is None:
+            self.report({"ERROR"}, "Load a driver first")
+            return {"CANCELLED"}
+        auto_scrub_range(s)
+        return {"FINISHED"}
+
+
+class SDK_OT_action_refresh(Operator):
+    bl_idname = "sdk.action_refresh"
+    bl_label = "Refresh Action Range"
+    bl_description = ("Re-sync the Action constraint ranges with the keys currently in the SDK Action. "
+                      "Use after moving or adding keys by hand in the Graph Editor / Dope Sheet")
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        s = context.scene.sdk_settings
+        del _WARNINGS[:]
+        drv_id, _b, _a, _i, _p, scope_key = resolve_driver_target(s)
+        if drv_id is None:
+            self.report({"ERROR"}, "Load a driver first")
+            return {"CANCELLED"}
+        action = bpy.data.actions.get(action_name_for(scope_key))
+        if action is None:
+            self.report({"ERROR"}, "No Action exists for the current driver; key something first")
+            return {"CANCELLED"}
+        update_action_constraint_ranges(action, s, scope_key)
+        invalidate_key_cache()
+        context.view_layer.update()
+        _report_problems(self, list(_WARNINGS))
+        self.report({"INFO"}, "Refreshed the range of '%s'" % action.name)
+        return {"FINISHED"}
+
+
 class SDK_OT_mirror_keys(Operator):
     bl_idname = "sdk.mirror_keys"
     bl_label = "Mirror / Flip to Symmetrical Bones"
@@ -2274,6 +2529,12 @@ class SDK_OT_key(Operator):
             done = []
             for kind, axis in tspecs:
                 label = "%s %s%s" % (item.bone or obj.name, kind, "XYZ"[axis])
+                if mode == "ACTION" and kind == "rot":
+                    skip = action_rotation_skip(item, True, bool(qspecs))
+                    if skip is not None:
+                        if skip:
+                            problems.append(skip)
+                        continue
                 if mode == "ADDITIVE":
                     msg = safe_call(key_additive, label, s, item, kind, axis,
                                     drv_id, d_var_path, idx, d_var_path, scope_key, x)
@@ -2292,6 +2553,12 @@ class SDK_OT_key(Operator):
             if mode != "ADDITIVE":
                 for i in qspecs:
                     label = "%s quat %s" % (item.bone or obj.name, "WXYZ"[i])
+                    if mode == "ACTION":
+                        skip = action_rotation_skip(item, False, any(k == "rot" for k, _a in tspecs))
+                        if skip is not None:
+                            if skip:
+                                problems.append(skip)
+                            continue
                     if mode == "DIRECT":
                         msg = safe_call(key_direct, label, s, item, "rotation_quaternion", i,
                                         drv_id, d_var_path, idx, d_var_path, x)
@@ -2302,6 +2569,8 @@ class SDK_OT_key(Operator):
                         problems.append(msg)
                     else:
                         keyed += 1
+                        if mode == "ACTION" and ("rot", 0) not in done:
+                            done.append(("rot", 0))  # reset_base puts a quaternion bone back to its base
 
             for rel, c_idx in cspecs:
                 label = "%s %s" % (item.bone or obj.name, rel)
@@ -2500,7 +2769,12 @@ class SDK_PT_main(Panel):
             box.prop(s, "driver_channel", text="")
             if s.driver_channel == "CUSTOM":
                 box.prop(s, "driver_custom")
-            box.prop(s, "driver_scrub", text="Scrub Value", slider=True)
+            box.prop(s, "driver_scrub_t", text="Scrub", slider=True)
+            row = box.row(align=True)
+            row.prop(s, "driver_scrub", text="Value")
+            row.prop(s, "scrub_min", text="Min")
+            row.prop(s, "scrub_max", text="Max")
+            row.operator("sdk.scrub_range_auto", text="", icon="AUTO")
             row = box.row(align=True)
             row.prop(s, "driver_rest", text="Rest")
             row.operator("sdk.capture_driver_rest", text="", icon="PINNED")
@@ -2561,6 +2835,8 @@ class SDK_PT_main(Panel):
             row.operator("sdk.capture_base", icon="PINNED")
             row.operator("sdk.reset_base", icon="LOOP_BACK")
             layout.prop(s, "auto_reset")
+        if s.mode == "ACTION":
+            layout.operator("sdk.action_refresh", icon="FILE_REFRESH")
 
         # ---- Actions ------------------------------------------------------
         row = layout.row(align=True)
@@ -2616,6 +2892,8 @@ classes = (
     SDK_OT_remove_driven,
     SDK_OT_capture_base,
     SDK_OT_reset_base,
+    SDK_OT_scrub_range_auto,
+    SDK_OT_action_refresh,
     SDK_OT_mirror_keys,
     SDK_OT_key,
     SDK_OT_delete_key,
