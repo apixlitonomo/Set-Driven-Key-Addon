@@ -1,13 +1,12 @@
 # Set Driven Key
 
-**Maya-style Set Driven Key for Blender** — drive object or bone channels from any controller, with **Configurations Manager**, **Dynamic Multi-Axis Stacking**, **Additive**, **Direct**, and **Action Constraint** modes, designed for professional character rigging and high viewport performance at scale.
+**Maya-style Set Driven Key for Blender** drive object or bone channels from any controller, with **Configurations Manager**, **Dynamic Multi-Axis Stacking**, **Additive**, **Direct**, and **Action Constraint** modes, designed for character rigging and high viewport performance.
 
 **Addon name (in Blender):** Set Driven Key  
-**Version:** 1.5.1
 **Minimum Blender:** 3.0.0 (Action Constraint mode also works on 5.0+, which uses slotted/layered Actions)  
-**Authors:** OceanMan, CloudKing, Apixelitonomo, U.F.Olive  
+**Authors:** OceanMan, CloudKing, U.F.Olive  
 **Location:** 3D Viewport → Sidebar (**N**) → **Driven Key**  
-**Category:** Animation
+**Category:** Animation, Rigging
 
 ---
 
@@ -15,7 +14,7 @@
 
 In Maya, **Set Driven Key** links one attribute (the *driver*) to others (the *driven*) so changing the driver value moves the driven channels through authored poses. Blender can do this with drivers and Action constraints, but manual setup is slow, fragile, and error-prone.
 
-This add-on provides an industry-standard interface to:
+This add-on provides an interface to:
 
 1. **Manage & Search Configurations:** Save, browse, filter, and load different Set Driven Key setups directly in the UI panel.
 2. **Stack Multiple Configurations Dynamically:** Stack different driver axes, controllers, and corrective poses on top of each other without overwriting existing relationships.
@@ -33,7 +32,7 @@ This add-on provides an industry-standard interface to:
 - **Save Configurations:** Save driver settings, driven targets, channel selections, and layer tags into named configurations. Objects are stored as pointers plus name / data-name / library fallbacks; missing items are reported when loading.
 - **Export / Import Configs:** Write all configurations to a JSON file and read them back (objects are matched by name).
 - **Search & Filter:** Search configurations in real-time within the UI list.
-- **Dynamic Layer Stacking:** Each configuration can have its own **Layer Tag**. When set, new relationships create independent stacked layers (using non-destructive Transformation constraints or scoped Action constraints) that compound their offsets cleanly without overwriting earlier configurations.
+- **Dynamic Layer Stacking:** Each configuration can have its own **Layer Tag**. When set, new relationships create independent stacked layers (using non-destructive Transformation constraints or scoped Action constraints) that compound their offsets without overwriting earlier configurations.
 
 ### Three Rigging Modes
 
@@ -41,7 +40,7 @@ This add-on provides an industry-standard interface to:
 |------|-----------|---------------|
 | **Additive (Multi-Axis)** (default) | Non-destructive. Offsets stack on top of base animation. Allows multiple driver axes, bones, and layers to drive the same target channels simultaneously. | Corrective shapes, secondary joint motion, multi-axis corrective setups, and stacking offsets over animator keyframes. |
 | **Direct** | Maya-style direct control. The driver takes over the channel and sets its value directly. High-performance evaluation. | Mechanical rigs, foot rolls, finger curls, simple switches, and mesh Shape Keys. |
-| **Action Constraint** | Drives an Action Constraint evaluation range (Location/Rotation/Scale drivers use the transform channel; custom properties and other drivers use Evaluation Time; driver value v maps to frame v × 100). Curves store offsets from the captured base (identity at rest), are grouped per bone, and stack with Additive layers on the same channel. After editing keys by hand, press **Refresh Action Range**. Keyframes are stored into a unified Action data-block per driver axis, evaluating multi-bone / multi-channel poses natively. | Complex facial rigs, corrective pose libraries, multi-bone secondary setups, and maximum rig cleanliness. |
+| **Action Constraint** | Drives an Action Constraint evaluation range (Location/Rotation/Scale drivers use the transform channel; custom properties and other drivers use Evaluation Time; driver value v maps to frame v × 100). Curves store offsets from the captured base (identity at rest), are grouped per bone, and stack with Additive layers on the same channel. After editing keys by hand, press **Refresh Action Range**. Keyframes are stored into a unified Action data-block per driver axis, evaluating multi-bone / multi-channel poses natively. | Complex facial rigs, corrective pose libraries, multi-bone secondary setups, and rig cleanliness. |
 
 ### Driver Controls & Full Data Paths
 
@@ -68,7 +67,7 @@ This add-on provides an industry-standard interface to:
 - **Mirror / Flip (`.L` <-> `.R`):** Copy and mirror SDK setups to the counterpart bone in the current mode: Direct curves, Additive constraint layers (`SDK Location/Rotation/Scale [scope]`) or Action Constraint curves (adding the matching Action constraint). Sign flips come from the bones' rest orientation, falling back to Blender's X-mirror convention. Reports how many curves/constraints were mirrored.
 - **High Viewport Performance at Scale:**
   - Optimized driver lookup using native collection indexing `animation_data.drivers.find(path, index)` (O(1) lookups instead of O(N) linear scans).
-  - Handles rigs with thousands of bones and driven channels with smooth viewport playback (>200 FPS).
+  - In theory, it can handle rigs with thousands of bones and driven channels with smooth viewport playback.
 - **Auto Rest Key:** Automatically keys the rest state when a curve gets its first key, ensuring channels return to base when the driver returns to rest.
 - **Reset to Base after Key:** Automatically restores posed channels back to base after keying in Additive and Action modes.
 - **Interpolation & Extrapolation:** Smooth (Bezier), Linear, Stepped (Constant); Constant or Linear extrapolation.
