@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Set Driven Key",
     "author": "OceanMan, CloudKing",
-    "version": (1, 6, 0),
+    "version": (1, 6, 1),
     "blender": (3, 0, 0),
     "location": "3D Viewport > Sidebar (N) > Driven Key & Property Right-Click Menu",
-    "description": "Professional Set Driven Key for Blender with full RNA Data Path support, "
+    "description": "Professional Set Driven Key for Blender, "
                    "Right-Click Picking, Configuration Manager, Multi-Axis Additive, Direct, and Action Constraint modes",
     "category": "Animation",
 }
@@ -437,8 +437,17 @@ def resolve_id_and_path(obj, path):
     return obj, path
 
 
+def resolve_id_path_index(obj, path, index=-1):
+    """Like resolve_id_and_path, but keeps an index embedded in `path` (e.g. location[0])."""
+    info = inspect_rna_target(obj, path)
+    if info.anim_id is not None:
+        return info.anim_id, info.anim_path, (info.index if info.index >= 0 else index)
+    id_block, rel = resolve_id_and_path(obj, path)
+    return id_block, rel, index
+
+
 def get_value(obj, path, index):
-    id_block, rel_path = resolve_id_and_path(obj, path)
+    id_block, rel_path, index = resolve_id_path_index(obj, path, index)
     value = id_block.path_resolve(rel_path)
     if index >= 0:
         value = value[index]
@@ -455,7 +464,7 @@ def _coerce_value(cur, value):
 
 def set_by_path(obj, path, index, value):
     """Assign `value` to the property at `path` (handles any ID block, array, or ID property)."""
-    id_block, rel_path = resolve_id_and_path(obj, path)
+    id_block, rel_path, index = resolve_id_path_index(obj, path, index)
     tokens = _split_path(rel_path)
     if not tokens:
         raise ValueError("Empty data path")
@@ -595,12 +604,16 @@ def capture_driver_rest(s):
 def auto_scrub_range(s):
     """Pick a usable Min/Max for the scrub slider from the driver channel and its current value."""
     info = resolve_driver_info(s)
+    tail = info.rel_attr or ""
+    m = _BONE_SUBPATH_RE.match(tail)
+    if m:
+        tail = m.group("dot") or ""
     lo, hi = -1.0, 1.0
-    if info.rel_attr == "rotation_euler":
+    if tail == "rotation_euler":
         lo, hi = -math.pi, math.pi
-    elif info.rel_attr == "scale":
+    elif tail == "scale":
         lo, hi = 0.0, 2.0
-    elif info.rel_attr == "location":
+    elif tail == "location":
         lo, hi = -2.0, 2.0
     elif info.ok and info.value is not None:
         v = info.value
@@ -1602,8 +1615,9 @@ def update_action_constraint_ranges(action, s, drv_info, extra_items=()):
                                     drv_info.var_id, drv_info.var_data_path,
                                     v_min, v_max, not s.live_preview)
             else:
-                con.min = v_min
-                con.max = v_max
+                k = math.degrees(1.0) if str(con.transform_channel).startswith("ROTATION") else 1.0
+                con.min = v_min * k
+                con.max = v_max * k
 
 
 _QUAT_IDENT = (1.0, 0.0, 0.0, 0.0)
@@ -2249,7 +2263,7 @@ class SDK_OT_config_add(Operator):
         cfg.driver_custom = s.driver_custom
         cfg.driver_rest = s.driver_rest
         cfg.mode = s.mode
-        cfg.config_layer_tag = s.config_layer_tag or cfg.name
+        cfg.config_layer_tag = s.config_layer_tag
         cfg.ch_loc = s.ch_loc
         cfg.ch_rot = s.ch_rot
         cfg.ch_quat = s.ch_quat
@@ -3028,7 +3042,7 @@ class SDK_OT_load_driven(Operator):
     def execute(self, context):
         s = context.scene.sdk_settings
         if context.mode == "POSE" and context.selected_pose_bones:
-            entries = [(context.active_object, pb.name) for pb in context.selected_pose_bones]
+            entries = [(pb.id_data, pb.name) for pb in context.selected_pose_bones]
         else:
             entries = [(o, "") for o in context.selected_objects]
         if not entries:
@@ -3436,6 +3450,8 @@ class SDK_OT_delete_key(Operator):
                             fc.update()
                             removed += 1
                             break
+                    if not len(fc.keyframe_points):
+                        _remove_driver_target(target_id, rel_path, p_idx, _is_con)
         else:
             for item in s.driven_items:
                 for target_id, rel_path, p_idx, _is_con in direct_resolved_targets(s, item, scope_key):
@@ -3448,6 +3464,8 @@ class SDK_OT_delete_key(Operator):
                             fc.update()
                             removed += 1
                             break
+                    if not len(fc.keyframe_points):
+                        _remove_driver_target(target_id, rel_path, p_idx, _is_con)
         invalidate_key_cache()
         context.view_layer.update()
         self.report({"INFO"}, "Removed %d key(s)" % removed)
