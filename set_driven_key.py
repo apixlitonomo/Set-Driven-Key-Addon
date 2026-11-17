@@ -601,19 +601,30 @@ def capture_driver_rest(s):
         pass
 
 
+def _leaf_attr(path):
+    """Last attribute of an RNA path.
+
+    'pose.bones["A"].rotation_euler' -> 'rotation_euler'
+    'location[0]' -> 'location'
+    """
+    text = path or ""
+    m = _BONE_SUBPATH_RE.match(text)
+    if m:
+        text = m.group("dot") or ""
+    base, idx = parse_custom(text) if text else ("", -1)
+    return base if idx >= 0 else text
+
+
 def auto_scrub_range(s):
     """Pick a usable Min/Max for the scrub slider from the driver channel and its current value."""
     info = resolve_driver_info(s)
-    tail = info.rel_attr or ""
-    m = _BONE_SUBPATH_RE.match(tail)
-    if m:
-        tail = m.group("dot") or ""
+    attr = _leaf_attr(info.anim_path or info.rel_attr)
     lo, hi = -1.0, 1.0
-    if tail == "rotation_euler":
+    if attr == "rotation_euler":
         lo, hi = -math.pi, math.pi
-    elif tail == "scale":
+    elif attr == "scale":
         lo, hi = 0.0, 2.0
-    elif tail == "location":
+    elif attr == "location":
         lo, hi = -2.0, 2.0
     elif info.ok and info.value is not None:
         v = info.value
@@ -980,10 +991,10 @@ def copy_curve_flipped(src, dst, sign):
     dst.update()
 
 
-def safe_call(fn, label, *args):
+def safe_call(fn, label, *args, **kwargs):
     """Run one key operation. A failure becomes a message instead of aborting everything."""
     try:
-        return fn(*args)
+        return fn(*args, **kwargs)
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
         return "%s failed: %s" % (label, e)
@@ -1686,6 +1697,17 @@ def key_action_mode(s, item, attr, idx, action, scope_key, drv_info, x):
 
     fcs = action_fcurves(action, create=True)
     fc = fcs.find(path, index=max(idx, 0))
+    # With Live Preview on, the viewport pose already includes this curve. The RNA
+    # channel does not, so add the current curve value back or the key drifts.
+    if s.live_preview and fc is not None and len(fc.keyframe_points) and attr != "rotation_quaternion":
+        try:
+            existing = float(fc.evaluate(x * ACTION_FRAMES_PER_UNIT))
+        except _RNA_ERRORS:
+            existing = ident
+        if attr == "scale":
+            y *= existing
+        else:
+            y += existing
     if fc is None:
         fc = new_action_fcurve(action, fcs, path, max(idx, 0), item.bone or "Object Transforms")
 
@@ -2802,9 +2824,10 @@ class SDK_OT_paste_custom_channel(Operator):
         if not raw:
             self.report({"ERROR"}, "Clipboard is empty")
             return {"CANCELLED"}
+        path = _normalize_copied_path(context, raw)
         existing = [p.strip() for p in s.ch_custom.split(";") if p.strip()]
-        if raw not in existing:
-            existing.append(raw)
+        if path not in existing:
+            existing.append(path)
         s.ch_custom = ";".join(existing)
         return {"FINISHED"}
 
@@ -3432,7 +3455,15 @@ class SDK_OT_delete_key(Operator):
                     self.report({"ERROR"}, str(e))
                     return {"CANCELLED"}
                 frame = x * ACTION_FRAMES_PER_UNIT
+                wanted = set()
+                for item in s.driven_items:
+                    if getattr(item, "target_kind", "OBJECT") != "OBJECT" or item.obj is None:
+                        continue
+                    for attr, ax in enabled_channels(s):
+                        wanted.add((full_path(item.bone, attr), ax))
                 for fc in list(fcs):
+                    if (fc.data_path, fc.array_index) not in wanted:
+                        continue
                     for kp in list(fc.keyframe_points):
                         if abs(kp.co.x - frame) < KEY_EPS * ACTION_FRAMES_PER_UNIT:
                             fc.keyframe_points.remove(kp)
