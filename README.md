@@ -3,8 +3,8 @@
 **Maya-style Set Driven Key for Blender** drive object or bone channels from any controller, with **Configurations Manager**, **Dynamic Multi-Axis Stacking**, **Additive**, **Direct**, and **Action Constraint** modes, designed for character rigging and high viewport performance.
 
 **Addon name (in Blender):** Set Driven Key  
-**Version:** 1.7.0  
-**Minimum Blender:** 3.0.0 (legacy single-file install); **4.2.0+** for the official Extension package  
+**Version:** 1.7.1  
+**Minimum Blender:** 3.0.0 (legacy zip install); **4.2.0+** for the official Extension package  
 **Authors:** OceanMan, CloudKing, Apixelitonomo, U.F.Olive  
 **Location:** 3D Viewport → Sidebar (**N**) → **Driven Key**  
 **Category:** Animation, Rigging
@@ -91,20 +91,21 @@ This add-on provides an interface to:
    ```bash
    blender --command extension build
    ```
-   This produces a file like `set_driven_key-1.7.0.zip` containing `blender_manifest.toml`, `__init__.py`, and `set_driven_key.py`.
+   This produces a file like `set_driven_key-1.7.1.zip`. The add-on is a package: `__init__.py` registers it, and the `set_driven_key/` folder holds one module per job (paths, drivers, constraints, actions, operators, UI).
 2. In Blender: **Edit → Preferences → Get Extensions → Install from Disk…** and select the `.zip`.
 3. Enable **Set Driven Key**, then open the 3D Viewport sidebar (**N**) → **Driven Key**.
 
 See the [Blender Extensions docs](https://docs.blender.org/manual/en/latest/advanced/extensions/index.html) for packaging and publishing details.
 
-### Legacy single-file install (Blender 3.0+)
+### Legacy install (Blender 3.0+)
 
-1. Download `set_driven_key.py`.
-2. **Edit → Preferences → Add-ons → Install from Disk** (or the legacy Install button).
-3. Select `set_driven_key.py` and enable **Set Driven Key**.
-4. Open the 3D Viewport sidebar (**N**) → **Driven Key**.
+The add-on is no longer a single script. Zip this repository (so `__init__.py` is at the root of the zip, next to the `set_driven_key` folder) and install that zip.
 
-**Requirements:** Blender **3.0** or newer for the legacy file; **4.2** or newer for the extension package.
+1. **Edit → Preferences → Add-ons → Install from Disk** (or the legacy Install button).
+2. Select the zip and enable **Set Driven Key**.
+3. Open the 3D Viewport sidebar (**N**) → **Driven Key**.
+
+**Requirements:** Blender **3.0** or newer for the legacy package; **4.2** or newer for the extension package.
 
 ---
 

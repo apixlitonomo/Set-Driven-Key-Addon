@@ -1,9 +1,9 @@
 schema_version = "1.0.0"
 
 id = "set_driven_key"
-version = "1.7.0"
+version = "1.7.1"
 name = "Set Driven Key"
-tagline = "Maya-style Set Driven Key with multi-axis stacking and Action constraints"
+tagline = "Maya-style driven keys, stacking, and Action constraints"
 maintainer = "Apixelitonomo"
 type = "add-on"
 
@@ -17,4 +17,12 @@ license = [
 ]
 copyright = [
   "2024-2026 OceanMan, CloudKing, Apixelitonomo, U.F.Olive",
+]
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "/.git/",
+  "/*.zip",
+  "/test_*.py",
 ]
