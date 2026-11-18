@@ -83,20 +83,6 @@ This add-on provides an interface to:
 
 ---
 
-## Installation
-
-### As a Blender Extension (recommended, Blender 4.2+)
-
-1. Build a package from this repository root (or download a release `.zip`):
-   ```bash
-   blender --command extension build
-   ```
-   This produces a file like `set_driven_key-1.7.1.zip`. The add-on is a package: `__init__.py` registers it, and the `set_driven_key/` folder holds one module per job (paths, drivers, constraints, actions, operators, UI).
-2. In Blender: **Edit → Preferences → Get Extensions → Install from Disk…** and select the `.zip`.
-3. Enable **Set Driven Key**, then open the 3D Viewport sidebar (**N**) → **Driven Key**.
-
-See the [Blender Extensions docs](https://docs.blender.org/manual/en/latest/advanced/extensions/index.html) for packaging and publishing details.
-
 ### Legacy install (Blender 3.0+)
 
 The add-on is no longer a single script. Zip this repository (so `__init__.py` is at the root of the zip, next to the `set_driven_key` folder) and install that zip.
