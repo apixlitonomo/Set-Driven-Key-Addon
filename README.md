@@ -3,8 +3,9 @@
 **Maya-style Set Driven Key for Blender** drive object or bone channels from any controller, with **Configurations Manager**, **Dynamic Multi-Axis Stacking**, **Additive**, **Direct**, and **Action Constraint** modes, designed for character rigging and high viewport performance.
 
 **Addon name (in Blender):** Set Driven Key  
-**Minimum Blender:** 3.0.0 (Action Constraint mode also works on 5.0+, which uses slotted/layered Actions)  
-**Authors:** OceanMan, CloudKing, U.F.Olive  
+**Version:** 1.7.0  
+**Minimum Blender:** 3.0.0 (legacy single-file install); **4.2.0+** for the official Extension package  
+**Authors:** OceanMan, CloudKing, Apixelitonomo, U.F.Olive  
 **Location:** 3D Viewport → Sidebar (**N**) → **Driven Key**  
 **Category:** Animation, Rigging
 
@@ -84,12 +85,26 @@ This add-on provides an interface to:
 
 ## Installation
 
+### As a Blender Extension (recommended, Blender 4.2+)
+
+1. Build a package from this repository root (or download a release `.zip`):
+   ```bash
+   blender --command extension build
+   ```
+   This produces a file like `set_driven_key-1.7.0.zip` containing `blender_manifest.toml`, `__init__.py`, and `set_driven_key.py`.
+2. In Blender: **Edit → Preferences → Get Extensions → Install from Disk…** and select the `.zip`.
+3. Enable **Set Driven Key**, then open the 3D Viewport sidebar (**N**) → **Driven Key**.
+
+See the [Blender Extensions docs](https://docs.blender.org/manual/en/latest/advanced/extensions/index.html) for packaging and publishing details.
+
+### Legacy single-file install (Blender 3.0+)
+
 1. Download `set_driven_key.py`.
-2. In Blender: **Edit → Preferences → Add-ons → Install from Disk** (or Install).
+2. **Edit → Preferences → Add-ons → Install from Disk** (or the legacy Install button).
 3. Select `set_driven_key.py` and enable **Set Driven Key**.
 4. Open the 3D Viewport sidebar (**N**) → **Driven Key**.
 
-**Requirements:** Blender **3.0** or newer (including Blender 4.x).
+**Requirements:** Blender **3.0** or newer for the legacy file; **4.2** or newer for the extension package.
 
 ---
 
