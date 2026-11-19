@@ -110,7 +110,7 @@ The add-on is no longer a single script. Zip this repository (so `__init__.py` i
 
 ## Changelog
 
-### 1.7.2
+### 3.7.1
 - Fix: **Export JSON** crashed with `NameError` (`bl_info` was not defined in `ops_config.py`).
 - Fix: the legacy zip now carries a literal `bl_info` in the root `__init__.py`, which Blender 3.0–4.1 needs to list the add-on.
 - Fix: **Delete Key** / **Delete Curves** only touch curves driven by the *current* driver, and only reset constraint properties of constraints this add-on created.
