@@ -6,7 +6,7 @@ from bpy.app.handlers import persistent
 from .const import ACTION_FRAMES_PER_UNIT, _READ_ERRORS
 from .drivers import find_driver_fcurve, is_sdk_fcurve, resolve_driver_info
 from .constraints import custom_direct_resolved_targets, direct_resolved_targets
-from .action import action_fcurves, action_name_for
+from .action import action_fcurves, find_action_for_driver
 
 
 
@@ -23,7 +23,7 @@ def get_all_keyed_values(s):
 
     if s.mode == "ACTION":
         scale = ACTION_FRAMES_PER_UNIT
-        act = bpy.data.actions.get(action_name_for(scope_key))
+        act = find_action_for_driver(drv_info)
         if act:
             try:
                 fcs = action_fcurves(act)

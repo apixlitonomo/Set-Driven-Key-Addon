@@ -2,6 +2,7 @@
 
 import json
 import re
+import sys
 
 from bpy.props import (
     StringProperty,
@@ -10,9 +11,13 @@ from bpy.types import Operator
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
 from .paths import _is_bpy_data_path, inspect_rna_target, short_rna_label
-from .constraints import capture
+from .constraints import capture, set_sdk_muted_for_settings
+from .drivers import DRIVER_ITEMS, driver_off_rest
 from .query import invalidate_key_cache
-from .config import _bools, _config_to_dict, _ref_label, obj_ref, parse_driven_data, resolve_config_object
+from .config import _bools, _config_to_dict, _ref_label, as_dict, obj_ref, parse_driven_data, resolve_config_object
+
+_VALID_MODES = ("ADDITIVE", "DIRECT", "ACTION")
+_VALID_CHANNELS = frozenset(item[0] for item in DRIVER_ITEMS)
 
 
 
@@ -98,9 +103,13 @@ class SDK_OT_config_load(Operator):
         notes = []
 
         try:
-            drv_ref = json.loads(cfg.driver_ref or "{}")
+            drv_ref = as_dict(json.loads(cfg.driver_ref or "{}"))
         except ValueError:
             drv_ref = {}
+        mode = cfg.mode if cfg.mode in _VALID_MODES else "ADDITIVE"
+        channel = cfg.driver_channel if cfg.driver_channel in _VALID_CHANNELS else "location:0"
+        if mode != cfg.mode or channel != cfg.driver_channel:
+            notes.append("invalid mode/driver channel in '%s' replaced by defaults" % cfg.name)
         drv_obj, how = resolve_config_object(cfg.driver_obj, drv_ref)
         uses_abs = (cfg.driver_channel == "CUSTOM" and _is_bpy_data_path(cfg.driver_custom))
         if not uses_abs:
@@ -114,10 +123,10 @@ class SDK_OT_config_load(Operator):
         if drv_obj is not None and cfg.driver_bone and (
                 drv_obj.pose is None or cfg.driver_bone not in drv_obj.pose.bones):
             missing.append("driver bone '%s'" % cfg.driver_bone)
-        s.driver_channel = cfg.driver_channel
+        s.driver_channel = channel
         s.driver_custom = cfg.driver_custom
         s.driver_rest = cfg.driver_rest
-        s.mode = cfg.mode
+        s.mode = mode
         s.config_layer_tag = cfg.config_layer_tag
         s.ch_loc = cfg.ch_loc
         s.ch_rot = cfg.ch_rot
@@ -162,8 +171,12 @@ class SDK_OT_config_load(Operator):
                 item.bone = bone
                 capture(item, s)
 
+        set_sdk_muted_for_settings(s, not s.live_preview)
         invalidate_key_cache()
         self.report({"INFO"}, "Loaded configuration '%s'" % cfg.name)
+        if s.mode == "DIRECT" and driver_off_rest(s):
+            self.report({"WARNING"}, "Driver is not at its rest value: base values captured for Direct mode "
+                                     "include its effect. Use 'Driver to Rest' and re-load for a clean base")
         if notes:
             self.report({"INFO"}, "; ".join(notes[:3]))
         if missing:
@@ -199,7 +212,7 @@ class SDK_OT_config_export(Operator, ExportHelper):
         s = context.scene.sdk_settings
         payload = {
             "addon": "Set Driven Key",
-            "version": list(bl_info["version"]),
+            "version": list(getattr(sys.modules.get(__package__), "bl_info", {}).get("version", ())),
             "configs": [_config_to_dict(c) for c in s.configs],
         }
         try:
@@ -233,15 +246,20 @@ class SDK_OT_config_import(Operator, ImportHelper):
 
         added = 0
         missing = []
+        if not isinstance(items, list):
+            self.report({"ERROR"}, "Could not read configurations: 'configs' is not a list")
+            return {"CANCELLED"}
         for c in items:
+            n_before = len(s.configs)
             try:
-                drv = c.get("driver", {})
-                ch = c.get("channels", {})
+                drv = as_dict(c.get("driver", {}))
+                ch = as_dict(c.get("channels", {}))
                 cfg = s.configs.add()
                 cfg.name = c.get("name", "Imported_SDK_Config")
                 cfg.config_layer_tag = c.get("layer_tag", "")
-                cfg.mode = c.get("mode", "ADDITIVE")
-                drv_ref = drv.get("obj") or {}
+                mode = c.get("mode", "ADDITIVE")
+                cfg.mode = mode if mode in _VALID_MODES else "ADDITIVE"
+                drv_ref = as_dict(drv.get("obj"))
                 cfg.driver_ref = json.dumps(drv_ref)
                 obj, _how = resolve_config_object(None, drv_ref)
                 cfg.driver_obj = obj
@@ -249,7 +267,8 @@ class SDK_OT_config_import(Operator, ImportHelper):
                 if not uses_abs and obj is None and drv_ref:
                     missing.append("driver object '%s'" % (drv_ref.get("name") or "?"))
                 cfg.driver_bone = drv.get("bone", "")
-                cfg.driver_channel = drv.get("channel", "location:0")
+                channel = drv.get("channel", "location:0")
+                cfg.driver_channel = channel if channel in _VALID_CHANNELS else "location:0"
                 cfg.driver_custom = drv.get("custom", "")
                 cfg.driver_rest = float(drv.get("rest", 0.0))
                 cfg.ch_loc = _bools(ch.get("loc"), 3)
@@ -267,7 +286,7 @@ class SDK_OT_config_import(Operator, ImportHelper):
                         if not inspect_rna_target(None, rpath).ok:
                             missing.append(short_rna_label(rpath))
                     else:
-                        ref = d.get("obj") or {}
+                        ref = as_dict(d.get("obj"))
                         entries.append({"kind": "OBJECT", "obj": ref, "bone": d.get("bone", ""), "rna_path": ""})
                         d_obj, _how = resolve_config_object(None, ref)
                         cfg.driven_refs.add().obj = d_obj
@@ -276,6 +295,8 @@ class SDK_OT_config_import(Operator, ImportHelper):
                 cfg.driven_data = json.dumps(entries)
                 added += 1
             except (AttributeError, TypeError, ValueError, KeyError) as e:
+                while len(s.configs) > n_before:  # drop the half-built entry
+                    s.configs.remove(len(s.configs) - 1)
                 self.report({"WARNING"}, "Skipped a malformed configuration: %s" % e)
         if added:
             s.config_index = len(s.configs) - 1

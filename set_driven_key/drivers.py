@@ -2,10 +2,11 @@
 
 import math
 import re
+from contextlib import contextmanager
 
 import bpy
 
-from .const import DIRECT_ATTR, KEY_EPS, SDK_VAR, _READ_ERRORS, _RNA_ERRORS
+from .const import DIRECT_ATTR, KEY_EPS, SDK_ACTION_CON_PREFIX, SDK_VAR, _READ_ERRORS, _RNA_ERRORS, _SDK_TRANSFORM_PREFIXES
 from .util import _warn
 from .paths import _is_array_property, _leaf_attr, _make_rna_error, full_path, identity_for, inspect_rna_target, resolve_id_and_path, set_by_path, var_path
 
@@ -164,6 +165,12 @@ def capture_driver_rest(s):
         pass
 
 
+def driver_off_rest(s):
+    """True when the driver is valid and sits away from its rest value."""
+    info = resolve_driver_info(s)
+    return bool(info.ok and info.value is not None and abs(info.value - s.driver_rest) > KEY_EPS)
+
+
 def auto_scrub_range(s):
     """Pick a usable Min/Max for the scrub slider from the driver channel and its current value."""
     info = resolve_driver_info(s)
@@ -238,6 +245,7 @@ def ensure_driver_on_id(target_id, rel_path, index, drv_id, drv_data_path, mute)
     if target_id is None:
         return None, "Target datablock not found"
     fc = find_driver_fcurve(target_id, rel_path, index)
+    created = False
     if fc is None:
         if index < 0 and _is_array_property(target_id, rel_path):
             return None, "'%s' is an array; give an index, e.g. %s[0]" % (rel_path, rel_path)
@@ -256,6 +264,7 @@ def ensure_driver_on_id(target_id, rel_path, index, drv_id, drv_data_path, mute)
                         pass
             return None, "'%s' is an array; give an index, e.g. %s[0]" % (rel_path, rel_path)
         fc.mute = mute
+        created = True
     elif not is_sdk_fcurve(fc):
         return None, ("'%s' already has a driver that wasn't made by this add-on "
                       "(remove or rename it first)" % var_path(rel_path, index))
@@ -285,9 +294,34 @@ def ensure_driver_on_id(target_id, rel_path, index, drv_id, drv_data_path, mute)
         t.data_path = drv_data_path
         drv.type = "SUM"
 
-    for m in list(fc.modifiers):
-        fc.modifiers.remove(m)
+    if created:
+        # driver_add() attaches a default Generator modifier; drop it, but leave any
+        # modifier the user adds later (Noise, Cycles...) alone.
+        for m in list(fc.modifiers):
+            fc.modifiers.remove(m)
     return fc, ""
+
+
+@contextmanager
+def drop_driver_if_unkeyed(target_id, rel_path, index):
+    """If the block fails, remove the SDK driver it was keying when it has no keys.
+
+    A driver F-curve without keys passes the raw driver value straight through,
+    which would snap the driven channel to the driver's value.
+    """
+    try:
+        yield
+    except Exception:
+        fc = find_driver_fcurve(target_id, rel_path, index)
+        if fc is not None and is_sdk_fcurve(fc) and not len(fc.keyframe_points):
+            try:
+                if index >= 0:
+                    target_id.driver_remove(rel_path, index)
+                else:
+                    target_id.driver_remove(rel_path)
+            except _RNA_ERRORS:
+                pass
+        raise
 
 
 def ensure_driver(obj, path, index, drv_obj, drv_data_path, mute):
@@ -353,15 +387,31 @@ def copy_curve_flipped(src, dst, sign):
     dst.update()
 
 
-def _remove_driver_target(target_id, rel_path, p_idx, is_con):
+_CON_NAME_RE = re.compile(r'constraints\[(?:"(?P<dq>(?:\\.|[^"\\])*)"|\'(?P<sq>(?:\\.|[^\'\\])*)\')\]')
+
+
+def _is_sdk_constraint_path(rel_path):
+    """True if rel_path points into a constraint this add-on created (by name)."""
+    m = _CON_NAME_RE.search(rel_path)
+    if m is None:
+        return False
+    raw = m.group("dq") if m.group("dq") is not None else m.group("sq")
+    name = bpy.utils.unescape_identifier(raw)
+    return name.startswith(_SDK_TRANSFORM_PREFIXES) or name.startswith(SDK_ACTION_CON_PREFIX)
+
+
+def _remove_driver_target(target_id, rel_path, p_idx, is_con, drv_info=None):
     fc = find_driver_fcurve(target_id, rel_path, p_idx)
     if fc is None or not is_sdk_fcurve(fc):
         return False
+    if drv_info is not None and drv_info.var_id is not None and not driver_matches(
+            fc, drv_info.var_id, drv_info.var_data_path):
+        return False  # controlled by a different driver; leave it alone
     try:
         target_id.driver_remove(rel_path, p_idx) if p_idx >= 0 else target_id.driver_remove(rel_path)
     except _RNA_ERRORS:
         return False
-    if is_con and ".constraints[" in rel_path:
+    if is_con and ".constraints[" in rel_path and _is_sdk_constraint_path(rel_path):
         try:
             set_by_path(target_id, rel_path, p_idx, identity_for(rel_path))
         except _RNA_ERRORS:

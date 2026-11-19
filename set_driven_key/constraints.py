@@ -8,7 +8,7 @@ from mathutils import Euler, Quaternion
 from .const import CON_SUFFIX, DIRECT_ATTR, SDK_ACTION_CON_PREFIX, SDK_CON_BASE, _ATTR_KIND, _BONE_SUBPATH_RE, _CHANNEL_ATTRS, _RNA_ERRORS, _SDK_NAME_TAIL_RE, _SDK_TRANSFORM_PREFIXES
 from .util import _fit_scope, _warn
 from .paths import con_data_path, full_path, get_value, inspect_rna_target, var_path
-from .drivers import add_rest_key, custom_specs, ensure_driver_on_id, find_driver_fcurve, is_sdk_fcurve, key_curve, owner_of, quat_specs, transform_specs
+from .drivers import add_rest_key, custom_specs, drop_driver_if_unkeyed, ensure_driver_on_id, find_driver_fcurve, is_sdk_fcurve, key_curve, owner_of, quat_specs, transform_specs
 from .dummy import _constraint_owners, get_or_create_dummy_target
 
 
@@ -352,8 +352,9 @@ def key_additive(s, item, kind, axis, drv_info, scope_key, x):
         fc, msg = ensure_driver_on_id(obj, path, p_idx, drv_info.var_id, drv_info.var_data_path, not s.live_preview)
         if fc is None:
             return msg
-        add_rest_key(s, fc, x, ident)
-        key_curve(fc, x, value, s.interpolation, s.extrapolation)
+        with drop_driver_if_unkeyed(obj, path, p_idx):
+            add_rest_key(s, fc, x, ident)
+            key_curve(fc, x, value, s.interpolation, s.extrapolation)
     return ""
 
 
@@ -374,8 +375,9 @@ def key_direct(s, item, attr, idx, drv_info, x):
     if fc is None:
         return msg
 
-    add_rest_key(s, fc, x, rest_value_for(item, attr, idx))
-    key_curve(fc, x, y, s.interpolation, s.extrapolation)
+    with drop_driver_if_unkeyed(obj, path, idx):
+        add_rest_key(s, fc, x, rest_value_for(item, attr, idx))
+        key_curve(fc, x, y, s.interpolation, s.extrapolation)
     return ""
 
 
@@ -407,8 +409,9 @@ def key_direct_rna(s, item, target_info, drv_info, x, raw_key=None):
         return msg
 
     rest_y = rest_value_for(item, anim_path, idx, raw_key=raw_key)
-    add_rest_key(s, fc, x, rest_y)
-    key_curve(fc, x, target_info.value, s.interpolation, s.extrapolation)
+    with drop_driver_if_unkeyed(anim_id, anim_path, idx):
+        add_rest_key(s, fc, x, rest_y)
+        key_curve(fc, x, target_info.value, s.interpolation, s.extrapolation)
     return ""
 
 

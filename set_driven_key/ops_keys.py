@@ -8,10 +8,10 @@ from bpy.types import Operator
 from .const import ACTION_FRAMES_PER_UNIT, DIRECT_ATTR, KEY_EPS, _RNA_ERRORS, _WARNINGS
 from .util import _report_problems, safe_call
 from .paths import con_data_path, full_path, inspect_rna_target, short_rna_label
-from .drivers import _remove_driver_target, custom_specs, enabled_channels, find_driver_fcurve, has_object_targets, is_sdk_fcurve, owner_of, quat_specs, resolve_driver_info, transform_specs
+from .drivers import _remove_driver_target, driver_matches, custom_specs, enabled_channels, find_driver_fcurve, has_object_targets, is_sdk_fcurve, owner_of, quat_specs, resolve_driver_info, transform_specs
 from .dummy import cleanup_dummy_target
 from .constraints import custom_direct_resolved_targets, direct_resolved_targets, find_sdk_constraint, is_sdk_transform_constraint, key_additive, key_direct, key_direct_rna, reset_base, set_sdk_muted_for_settings
-from .action import action_constraint_name_for, action_fcurves, action_name_for, action_rotation_skip, get_action_for_driver, key_action_mode, remove_eval_time_driver, update_action_constraint_ranges
+from .action import action_constraint_name_for, action_fcurves, action_rotation_skip, find_action_for_driver, get_action_for_driver, key_action_mode, remove_eval_time_driver, update_action_constraint_ranges
 from .query import invalidate_key_cache
 from .mirror import flip_name, mirror_action, mirror_additive, mirror_direct, mirror_signs
 
@@ -30,7 +30,7 @@ class SDK_OT_action_refresh(Operator):
         if drv_info.var_id is None:
             self.report({"ERROR"}, drv_info.error or "Load a valid driver first")
             return {"CANCELLED"}
-        action = bpy.data.actions.get(action_name_for(drv_info.scope_key))
+        action = find_action_for_driver(drv_info)
         if action is None:
             self.report({"ERROR"}, "No Action exists for the current driver; key something first")
             return {"CANCELLED"}
@@ -59,7 +59,7 @@ class SDK_OT_mirror_keys(Operator):
         scope_key = drv_info.scope_key
         action = None
         if s.mode == "ACTION":
-            action = bpy.data.actions.get(action_name_for(scope_key))
+            action = find_action_for_driver(drv_info)
             if action is None:
                 self.report({"ERROR"}, "No Action exists for the current driver; key something first")
                 return {"CANCELLED"}
@@ -77,6 +77,9 @@ class SDK_OT_mirror_keys(Operator):
             opp = flip_name(item.bone)
             if not opp or opp not in obj.pose.bones:
                 unpaired += 1
+                continue
+            if obj == drv_info.var_id and opp == drv_info.bone:
+                problems.append("'%s' is the driver bone and can't be driven by itself; skipped" % opp)
                 continue
             pair = (obj.as_pointer(), frozenset((item.bone, opp)))
             if pair in done_pairs:
@@ -160,7 +163,11 @@ class SDK_OT_key(Operator):
 
         keyed = 0
         needs_action = (mode == "ACTION" and has_obj_items and (tspecs or qspecs))
-        action = get_action_for_driver(scope_key) if needs_action else None
+        action = None
+        action_is_new = False
+        if needs_action:
+            action_is_new = find_action_for_driver(drv_info) is None
+            action = get_action_for_driver(scope_key, drv_info.var_id.name if drv_info.var_id else "", drv_info)
 
         for item in s.driven_items:
             if item.target_kind == "RNA_PATH":
@@ -240,7 +247,11 @@ class SDK_OT_key(Operator):
                 reset_base(item, done)
 
         if mode == "ACTION" and action:
-            update_action_constraint_ranges(action, s, drv_info)
+            if action_is_new and not keyed and action.users <= 1:
+                # Nothing could be keyed: don't leave an empty fake-user Action behind.
+                bpy.data.actions.remove(action)
+            else:
+                update_action_constraint_ranges(action, s, drv_info)
 
         set_sdk_muted_for_settings(s, not s.live_preview)
         invalidate_key_cache()
@@ -270,7 +281,7 @@ class SDK_OT_delete_key(Operator):
 
         removed = 0
         if s.mode == "ACTION":
-            act = bpy.data.actions.get(action_name_for(scope_key))
+            act = find_action_for_driver(drv_info)
             if act:
                 try:
                     fcs = action_fcurves(act)
@@ -288,7 +299,7 @@ class SDK_OT_delete_key(Operator):
                     if (fc.data_path, fc.array_index) not in wanted:
                         continue
                     for kp in list(fc.keyframe_points):
-                        if abs(kp.co.x - frame) < KEY_EPS * ACTION_FRAMES_PER_UNIT:
+                        if abs(kp.co.x - frame) < KEY_EPS:
                             fc.keyframe_points.remove(kp)
                             fc.update()
                             removed += 1
@@ -298,19 +309,7 @@ class SDK_OT_delete_key(Operator):
                     fc = find_driver_fcurve(target_id, rel_path, p_idx)
                     if fc is None or not is_sdk_fcurve(fc):
                         continue
-                    for kp in list(fc.keyframe_points):
-                        if abs(kp.co.x - x) < KEY_EPS:
-                            fc.keyframe_points.remove(kp)
-                            fc.update()
-                            removed += 1
-                            break
-                    if not len(fc.keyframe_points):
-                        _remove_driver_target(target_id, rel_path, p_idx, _is_con)
-        else:
-            for item in s.driven_items:
-                for target_id, rel_path, p_idx, _is_con in direct_resolved_targets(s, item, scope_key):
-                    fc = find_driver_fcurve(target_id, rel_path, p_idx)
-                    if fc is None or not is_sdk_fcurve(fc):
+                    if not driver_matches(fc, drv_info.var_id, drv_info.var_data_path):
                         continue
                     for kp in list(fc.keyframe_points):
                         if abs(kp.co.x - x) < KEY_EPS:
@@ -319,7 +318,23 @@ class SDK_OT_delete_key(Operator):
                             removed += 1
                             break
                     if not len(fc.keyframe_points):
-                        _remove_driver_target(target_id, rel_path, p_idx, _is_con)
+                        _remove_driver_target(target_id, rel_path, p_idx, _is_con, drv_info)
+        else:
+            for item in s.driven_items:
+                for target_id, rel_path, p_idx, _is_con in direct_resolved_targets(s, item, scope_key):
+                    fc = find_driver_fcurve(target_id, rel_path, p_idx)
+                    if fc is None or not is_sdk_fcurve(fc):
+                        continue
+                    if not driver_matches(fc, drv_info.var_id, drv_info.var_data_path):
+                        continue
+                    for kp in list(fc.keyframe_points):
+                        if abs(kp.co.x - x) < KEY_EPS:
+                            fc.keyframe_points.remove(kp)
+                            fc.update()
+                            removed += 1
+                            break
+                    if not len(fc.keyframe_points):
+                        _remove_driver_target(target_id, rel_path, p_idx, _is_con, drv_info)
         invalidate_key_cache()
         context.view_layer.update()
         self.report({"INFO"}, "Removed %d key(s)" % removed)
@@ -340,7 +355,7 @@ class SDK_OT_delete_curves(Operator):
         orphans = 0
 
         if s.mode == "ACTION":
-            act = bpy.data.actions.get(action_name_for(scope_key))
+            act = find_action_for_driver(drv_info)
             con_name = action_constraint_name_for(scope_key)
             for item in s.driven_items:
                 if item.target_kind == "OBJECT":
@@ -351,14 +366,14 @@ class SDK_OT_delete_curves(Operator):
                         owner.constraints.remove(con)
                         removed += 1
                 for target_id, rel_path, p_idx, is_con in custom_direct_resolved_targets(s, item):
-                    if _remove_driver_target(target_id, rel_path, p_idx, is_con):
+                    if _remove_driver_target(target_id, rel_path, p_idx, is_con, drv_info):
                         removed += 1
             if act and act.users <= 1:
                 bpy.data.actions.remove(act)
         else:
             for item in s.driven_items:
                 for target_id, rel_path, p_idx, is_con in direct_resolved_targets(s, item, scope_key):
-                    if _remove_driver_target(target_id, rel_path, p_idx, is_con):
+                    if _remove_driver_target(target_id, rel_path, p_idx, is_con, drv_info):
                         removed += 1
 
                 if item.target_kind != "OBJECT" or item.obj is None:

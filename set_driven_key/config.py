@@ -21,9 +21,14 @@ def obj_ref(obj):
     }
 
 
+def as_dict(value):
+    return value if isinstance(value, dict) else {}
+
+
 def resolve_config_object(pointer_obj, ref):
     if pointer_obj is not None:
         return pointer_obj, "pointer"
+    ref = as_dict(ref)
     name = ref.get("name", "")
     lib = ref.get("lib") or ""
     if name:
@@ -52,9 +57,9 @@ def parse_driven_data(raw):
             kind = e.get("kind") or ("RNA_PATH" if e.get("rna_path") else "OBJECT")
             out.append({
                 "kind": kind,
-                "obj": e.get("obj") or {},
-                "bone": e.get("bone", ""),
-                "rna_path": e.get("rna_path", ""),
+                "obj": as_dict(e.get("obj")),
+                "bone": str(e.get("bone", "") or ""),
+                "rna_path": str(e.get("rna_path", "") or ""),
             })
         elif isinstance(e, (list, tuple)) and len(e) >= 2:
             out.append({"kind": "OBJECT", "obj": {"name": e[0]}, "bone": e[1], "rna_path": ""})
@@ -62,7 +67,7 @@ def parse_driven_data(raw):
 
 
 def _ref_label(ref, bone):
-    return (ref.get("name") or "?") + ((":" + bone) if bone else "")
+    return (as_dict(ref).get("name") or "?") + ((":" + bone) if bone else "")
 
 
 def _bools(vals, n):
@@ -72,7 +77,7 @@ def _bools(vals, n):
 
 def _config_to_dict(cfg):
     try:
-        drv_ref = json.loads(cfg.driver_ref or "{}")
+        drv_ref = as_dict(json.loads(cfg.driver_ref or "{}"))
     except ValueError:
         drv_ref = {}
     if cfg.driver_obj is not None:

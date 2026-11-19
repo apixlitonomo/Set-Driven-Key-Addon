@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Set Driven Key",
     "author": "OceanMan, CloudKing, Apixelitonomo, U.F.Olive",
-    "version": (1, 7, 1),
+    "version": (1, 7, 2),
     "blender": (3, 0, 0),
     "location": "3D Viewport > Sidebar (N) > Driven Key & Property Right-Click Menu",
     "description": (
@@ -73,7 +73,7 @@ from .query import _on_history_change
 from .dummy import cleanup_dummy_target
 
 # Names other scripts and the test suite import from this package.
-from .action import action_fcurves, action_name_for
+from .action import action_fcurves, action_name_for, find_action_for_driver
 from .constraints import capture
 from .drivers import auto_scrub_range, capture_driver_rest, resolve_driver_info, write_driver_value
 from .ops_driven import _add_rna_driven_item
@@ -134,9 +134,11 @@ def register():
     for c in classes:
         try:
             bpy.utils.register_class(c)
-        except ValueError:
-            # Already registered (reload or dual legacy + extension install)
-            pass
+        except ValueError as e:
+            # Already registered (reload or dual legacy + extension install) is expected;
+            # anything else is a real problem, so make it visible.
+            if "already registered" not in str(e):
+                print("[SDK] could not register %s: %s" % (c.__name__, e))
     if not hasattr(bpy.types.Scene, "sdk_settings"):
         bpy.types.Scene.sdk_settings = PointerProperty(type=SDK_Settings)
     for handlers in _HANDLER_LISTS:

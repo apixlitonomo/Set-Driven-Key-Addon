@@ -9,8 +9,8 @@ from bpy.props import (
 from bpy.types import Operator
 
 from .paths import _normalize_copied_path, extract_context_button_path, inspect_rna_target, short_rna_label
-from .drivers import transform_specs
-from .constraints import capture, capture_custom_rest, reset_base
+from .drivers import driver_off_rest, transform_specs
+from .constraints import capture, capture_custom_rest, reset_base, set_sdk_muted_for_settings
 from .query import invalidate_key_cache
 from .ui import _can_pick_button_property
 
@@ -288,7 +288,11 @@ class SDK_OT_load_driven(Operator):
             item.bone = bone
             capture(item, s)
         s.driven_index = max(0, len(s.driven_items) - 1)
+        set_sdk_muted_for_settings(s, not s.live_preview)
         invalidate_key_cache()
+        if s.mode == "DIRECT" and driver_off_rest(s):
+            self.report({"WARNING"}, "Driver is not at its rest value: base values captured for Direct mode "
+                                     "include its effect. Use 'Driver to Rest' and load again for a clean base")
         return {"FINISHED"}
 
 

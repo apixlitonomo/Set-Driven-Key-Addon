@@ -3,7 +3,6 @@
 **Maya-style Set Driven Key for Blender** drive object or bone channels from any controller, with **Configurations Manager**, **Dynamic Multi-Axis Stacking**, **Additive**, **Direct**, and **Action Constraint** modes, designed for character rigging and high viewport performance.
 
 **Addon name (in Blender):** Set Driven Key  
-**Version:** 1.7.1  
 **Minimum Blender:** 3.0.0 (legacy zip install); **4.2.0+** for the official Extension package  
 **Authors:** OceanMan, CloudKing, Apixelitonomo, U.F.Olive  
 **Location:** 3D Viewport → Sidebar (**N**) → **Driven Key**  
@@ -108,3 +107,16 @@ The add-on is no longer a single script. Zip this repository (so `__init__.py` i
 9. Use **Prev Key** and **Next Key** to review your keyed poses, or scrub the driver to see the animation evaluate in real-time.
 
 ---
+
+## Changelog
+
+### 1.7.2
+- Fix: **Export JSON** crashed with `NameError` (`bl_info` was not defined in `ops_config.py`).
+- Fix: the legacy zip now carries a literal `bl_info` in the root `__init__.py`, which Blender 3.0–4.1 needs to list the add-on.
+- Fix: **Delete Key** / **Delete Curves** only touch curves driven by the *current* driver, and only reset constraint properties of constraints this add-on created.
+- Fix: **Mirror** skips a destination bone that is the driver bone (would create a dependency cycle).
+- Fix: Configuration load / import validate the mode and driver channel, tolerate malformed references and no longer leave half-built configurations in the list.
+- Fix: SDK Actions are named per driver object (`SDK_Action_<object>__<scope>`), so duplicated rigs no longer share one Action. Actions from older files are still found by their old name.
+- Fix: a failed Key no longer leaves a key-less (pass-through) driver, or an empty SDK Action, behind.
+- Fix: Delete Key in Action mode uses the same tolerance as keying (it could remove neighbouring keys).
+- Fix: Action constraint slot is re-synced after keying (Blender 4.4+), user F-modifiers on SDK curves are no longer stripped, newly loaded driven targets honour Live Preview, and Direct mode warns when targets are loaded while the driver is away from its rest value.

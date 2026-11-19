@@ -4,7 +4,7 @@ from mathutils import Matrix
 
 from .const import DIRECT_ATTR, _CHANNEL_ATTRS, _DEFAULT_MIRROR, _FLIP_PREFIX_RE, _FLIP_SUFFIX_RE, _FLIP_WORDS, _RNA_ERRORS
 from .paths import full_path
-from .drivers import copy_curve_flipped, driver_matches, enabled_channels, ensure_driver_on_id, find_driver_fcurve, is_sdk_fcurve, transform_specs
+from .drivers import copy_curve_flipped, driver_matches, drop_driver_if_unkeyed, enabled_channels, ensure_driver_on_id, find_driver_fcurve, is_sdk_fcurve, transform_specs
 from .constraints import additive_targets, ensure_constraint, mode_conflict
 from .action import action_fcurves, ensure_action_constraint, new_action_fcurve
 
@@ -69,7 +69,8 @@ def mirror_direct(s, item, dst, signs, drv_info, problems):
         if dst_fc is None:
             problems.append(msg)
             continue
-        copy_curve_flipped(src_fc, dst_fc, signs[attr][ax])
+        with drop_driver_if_unkeyed(obj, full_path(dst.bone, attr), ax):
+            copy_curve_flipped(src_fc, dst_fc, signs[attr][ax])
         curves += 1
     return curves, 0
 
@@ -103,7 +104,8 @@ def mirror_additive(s, item, dst, signs, drv_info, problems):
             if dst_fc is None:
                 problems.append(msg)
                 continue
-            copy_curve_flipped(src_fc, dst_fc, sign)
+            with drop_driver_if_unkeyed(obj, dp, di):
+                copy_curve_flipped(src_fc, dst_fc, sign)
             curves += 1
             cons.add(con.name)
     return curves, len(cons)

@@ -85,13 +85,29 @@ def action_constraint_name_for(scope_key):
     return "%s%s]" % (SDK_ACTION_CON_PREFIX, _fit_scope(scope_key, len(SDK_ACTION_CON_PREFIX) + 1))
 
 
-def action_name_for(scope_key):
+def action_name_for(scope_key, id_name=""):
+    """Action name for a driver scope. With `id_name` (the driver's ID name) the name is
+    unique per driver object, so duplicated rigs don't share one Action."""
+    if id_name:
+        scope_key = "%s__%s" % (id_name, scope_key)
     return "%s%s" % (SDK_ACTION_PREFIX, _fit_scope(scope_key, len(SDK_ACTION_PREFIX)))
 
 
-def get_action_for_driver(scope_key):
-    act_name = action_name_for(scope_key)
-    act = bpy.data.actions.get(act_name)
+def find_action_for_driver(drv_info):
+    """Existing SDK Action for this driver: the per-object name first, then the pre-1.7.2 name."""
+    var_id = getattr(drv_info, "var_id", None)
+    if var_id is not None:
+        act = bpy.data.actions.get(action_name_for(drv_info.scope_key, var_id.name))
+        if act is not None:
+            return act
+    return bpy.data.actions.get(action_name_for(drv_info.scope_key))
+
+
+def get_action_for_driver(scope_key, id_name="", drv_info=None):
+    act = find_action_for_driver(drv_info) if drv_info is not None else None
+    if act is None and not id_name:
+        act = bpy.data.actions.get(action_name_for(scope_key))
+    act_name = action_name_for(scope_key, id_name)
     if act is None:
         act = bpy.data.actions.new(act_name)
         if hasattr(act, "id_root"):
@@ -103,6 +119,19 @@ def get_action_for_driver(scope_key):
     if _is_layered_only(act):
         action_fcurves(act, create=True)
     return act
+
+
+def _sync_action_slot(con, action):
+    """Point the constraint at the Action's slot (Blender 4.4+). The slot may only exist
+    after the first curve has been created, so this is re-run after keying."""
+    if not hasattr(con, "action_slot"):
+        return
+    slot = _action_slot(action, create=_is_layered_only(action))
+    if slot is not None and con.action_slot != slot:
+        try:
+            con.action_slot = slot
+        except _RNA_ERRORS:
+            pass
 
 
 def ensure_action_constraint(s, item, action, scope_key, drv_info):
@@ -135,13 +164,7 @@ def ensure_action_constraint(s, item, action, scope_key, drv_info):
                       "use a Location / Rotation / Scale driver channel")
 
     con.action = action
-    if hasattr(con, "action_slot"):
-        slot = _action_slot(action, create=_is_layered_only(action))
-        if slot is not None and con.action_slot != slot:
-            try:
-                con.action_slot = slot
-            except _RNA_ERRORS:
-                pass
+    _sync_action_slot(con, action)
     if channel is not None:
         if hasattr(con, "use_eval_time"):
             con.use_eval_time = False
@@ -216,6 +239,7 @@ def update_action_constraint_ranges(action, s, drv_info, extra_items=()):
             con = find_sdk_constraint(owner, con_name, "ACTION")
             if con is None or con.action != action:
                 continue
+            _sync_action_slot(con, action)
             con.frame_start = f_min
             con.frame_end = f_max
             if getattr(con, "use_eval_time", False):
