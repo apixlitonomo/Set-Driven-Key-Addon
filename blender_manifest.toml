@@ -1,0 +1,28 @@
+schema_version = "1.0.0"
+
+id = "set_driven_key"
+version = "1.7.2"
+name = "Set Driven Key"
+tagline = "Maya-style driven keys, stacking, and Action constraints"
+maintainer = "Apixelitonomo"
+type = "add-on"
+
+website = "https://github.com/apixlitonomo/Set-Driven-Key-Addon"
+tags = ["Animation", "Rigging"]
+
+blender_version_min = "4.2.0"
+
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+copyright = [
+  "2024-2026 OceanMan, CloudKing, Apixelitonomo, U.F.Olive",
+]
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "/.git/",
+  "/*.zip",
+  "/test_*.py",
+]
